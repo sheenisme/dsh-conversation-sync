@@ -90,10 +90,10 @@ space, and so on. Nothing is left for you to guess.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-108 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+119 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics, host keys, SQLite reads, jump-chain
-planning, the connection pool, and the browser half through a stub module
-loader. CI additionally installs the packed plugin into five real DSH releases
+planning, the connection pool, the system-ssh transport, and the browser half
+through a stub module loader. CI additionally installs the packed plugin into five real DSH releases
 and drives the actual RPC surface.
 
 See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job proves and how

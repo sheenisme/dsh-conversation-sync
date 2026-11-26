@@ -141,19 +141,38 @@ component's session log).
   version 1), tables `bindings` and `states`.
 - Machine list, discovered sessions and key-path references are held in memory
   and refreshed by the discovery tick; key paths are durable DSH credentials.
-- Authentication uses a private-key file, or `ssh-agent` when the configured
-  path ends in `.pub`. The agent path is what makes passphrase-protected keys
-  usable: ssh2 cannot decrypt them without the passphrase, and storing a
-  passphrase in plugin config would be worse than loading the key once.
-- Host keys are checked, and remembered. `known_hosts.json` lives in the plugin
-  data directory and records the fingerprint of every server the plugin has
-  connected to. The default `hostKeyMode` is `accept-new`: a server seen for the
-  first time is trusted and recorded (trust on first use), and a *changed* key is
-  refused — which is exactly the case that matters, because a changed host key on
-  a machine you already sync with means either a rebuild or an interception. Set
-  it to `verify` to refuse unknown servers too, or `off` to skip the check. This
-  is deliberately not silent: the refusal is reported through the normal failure
-  diagnostics with what to do about it.
+- SSH runs through the system `ssh` binary, not a bundled SSH library. This is
+  not a preference: `ssh2` ships a native build script, and pnpm refuses to
+  install a dependency with unapproved build scripts unless the *profile* opts
+  in through `allowBuilds` — which a plugin cannot ask for. Declaring it as an
+  optional peer meant a clean install had no SSH at all, and every remote machine
+  failed with `Cannot find package 'ssh2'`. Driving `ssh` removes the native
+  dependency and inherits the user's real `~/.ssh/config`: `ProxyJump`,
+  `IdentityFile`, `Include`, `Match` blocks, agent forwarding and `known_hosts`
+  all behave exactly as they do in the user's terminal. If `ssh` is unavailable
+  the older `ssh2` path is still there as a fallback.
+- Authentication resolves a key in three steps: the path saved for this machine,
+  then the host's own `IdentityFile` from `~/.ssh/config`, then the conventional
+  `~/.ssh/id_ed25519` / `id_ecdsa` / `id_rsa`. A saved path that no longer exists
+  falls back to the later steps and logs a warning instead of failing the machine,
+  because a moved key used to mean "no sessions at all" with no hint why. A
+  `.pub` path means "use the agent".
+- A machine that cannot be reached is reported once. The transport remembers a
+  connection-level failure (auth, refused, DNS, host key, timeout) and every
+  later command on that transport fails immediately, because discovery asks for
+  the remote home and then each tool root: without it, one dead host cost four
+  full connect attempts and produced four copies of the same error. Measured
+  against a real `~/.ssh/config` with unreachable hosts, per-machine scan time fell
+  from 70-112s to about 5s.
+- Host keys are checked by `ssh` itself through the user's `known_hosts`, and
+  additionally recorded in `known_hosts.json` in the plugin data directory for
+  the `ssh2` fallback path. The default `hostKeyMode` is `accept-new`: a server seen
+  for the first time is trusted and recorded (trust on first use), and a *changed*
+  key is refused — which is exactly the case that matters, because a changed host
+  key on a machine you already sync with means either a rebuild or an
+  interception. Set it to `verify` to refuse unknown servers too, or `off` to skip
+  the check. This is deliberately not silent: the refusal is reported through the
+  normal failure diagnostics with what to do about it.
 - Two cursors are tracked per binding, and they are different numbers. `dshSeqs`
   records how far the DSH session has been written (the import cursor); `outSeqs`
   records how much of it has already been copied into the external file (the
@@ -167,8 +186,9 @@ component's session log).
   channel, a dropped socket); ordinary errors such as "that file is not there"
   keep it open, because reconnecting would waste a handshake per tick. The pool
   is closed when the plugin unloads, so a reload cannot leak sockets.
-- The SSH transport keeps one SFTP connection per machine (chained through jump
-  hosts when needed) and reconnects on failure.
+- The system-ssh transport keeps one multiplexed master connection per machine
+  (`ControlMaster`/`ControlPersist`) instead of one SFTP channel per call, so a
+  scan of many roots costs one handshake rather than one per command.
 - Directory creation walks the path one component at a time rather than using
   `fs.mkdir(..., {recursive: true})`. On Linux, recursive mkdir can loop forever
   when the filesystem answers ENOENT for a parent that exists (`/proc` does), and
@@ -181,12 +201,15 @@ component's session log).
 
 ## Testing
 
-`npm test` runs 108 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 119 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
 pins the listing contract (a row's `count` is messages, never raw events) and the
-`strict` read that an export needs. `test/client.test.js` loads `client.js`
+`strict` read that an export needs. `test/openssh.test.js` drives the system-ssh
+transport through a stand-in `ssh` on PATH, so the command building, shell
+quoting, exit-code mapping and the "fail once, not once per root" cache are
+covered without a server. `test/client.test.js` loads `client.js`
 through a stub module loader so the browser half is testable too: it fails when a
 service is used but missing from `inject` (that was a real bug — without
 `sessions` the sidebar never learned about a freshly imported session), when the
@@ -200,7 +223,7 @@ that unit fixtures cannot:
 | `install-dsh.mjs` | installs one DSH version so it can actually run under plain Node — it reads `@deepseek-ai/dsh-app-boot`'s peer ranges from the registry, because npm does not install the peers of a transitive package |
 | `harness.mjs` | shared profile bootstrap, health-line wait, activation check and auth-cookie handshake |
 | `boot-check.mjs` | "does this DSH version support the plugin": install, boot, import, read back |
-| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `reimport`, `direction`, `keys` — the user journey over the real RPC surface |
+| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `reimport`, `direction`, `keys`, `ssh` — the user journey over the real RPC surface |
 
 `.github/workflows/ci.yml` runs three jobs:
 
@@ -208,7 +231,7 @@ that unit fixtures cannot:
 | --- | --- |
 | `unit` | the pure modules behave, on the oldest supported Node (24.9.0) and the latest 24.x |
 | `compatibility` | the plugin activates and imports a conversation on each of the **five most recent DSH releases** |
-| `functional` | the user journey on the two newest releases: import, export, all five tool formats, failure reporting, no duplicate re-import, and that an explicit sync direction is honoured |
+| `functional` | the user journey on the two newest releases: import, export, all five tool formats, failure reporting, no duplicate re-import, that an explicit sync direction is honoured, the SSH key resolution order, and a full discover-and-import over the SSH transport |
 
 A version counts as supported only when `boot-check` exits 0, which requires both
 that no bundle failed to activate and that a conversation really landed in a DSH

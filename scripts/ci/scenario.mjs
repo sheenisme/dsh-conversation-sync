@@ -17,6 +17,7 @@
  *   failure   a broken source fails with a reason and recovery conditions
  *   reimport  syncing twice does not duplicate already-imported content
  *   keys      SSH keys resolve credential -> IdentityFile -> ~/.ssh defaults
+ *   ssh       a session on a "remote" host is discovered and imported over ssh
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -201,6 +202,91 @@ const scenarios = {
     return { prod: keys['ssh:prod'], bastion: keys['ssh:bastion'] }
   },
 
+  /**
+   * The whole remote path, without a server to depend on.
+   *
+   * A stand-in `ssh` on PATH runs the remote command locally with HOME pointed
+   * at a fake remote home. That is enough to prove the parts that actually
+   * break: the system-ssh transport is selected at all (not the missing ssh2
+   * module), `home`/`list`/`read`/`stat` round-trip through the real argument
+   * building and shell quoting, discovery finds rollouts under that home, and a
+   * session found over "ssh" imports into DSH exactly like a local one. Every
+   * other scenario talks to the local filesystem, so without this the remote
+   * half would only ever be unit-tested.
+   */
+  /**
+   * Runs before the harness boots: the stand-in `ssh` must already be on PATH,
+   * because the child process inherits PATH at spawn time.
+   */
+  prepare: {
+    async ssh(args) {
+      const remoteHome = path.join(args.home, 'remote-home')
+      const rollout = path.join(remoteHome, '.claude', 'projects', 'proj', 'session.jsonl')
+      await fs.mkdir(path.dirname(rollout), { recursive: true })
+      await fs.copyFile(path.join(args.fixtures, 'claude-basic.jsonl'), rollout)
+      const binDir = path.join(args.home, 'fakebin')
+      await fs.mkdir(binDir, { recursive: true })
+      await fs.writeFile(path.join(binDir, 'ssh'), [
+        '#!/bin/sh',
+        'for a in "$@"; do if [ "$a" = "-V" ]; then echo "OpenSSH_10.0p1" >&2; exit 0; fi; done',
+        'if [ "$1" = "-O" ]; then exit 0; fi',
+        'last=""',
+        'for a in "$@"; do last="$a"; done',
+        `export HOME=${JSON.stringify(remoteHome)}`,
+        'exec /bin/sh -c "$last"',
+        '',
+      ].join('\n'), { mode: 0o755 })
+      // The harness child inherits PATH, so this is how the plugin finds the
+      // stand-in instead of the real ssh.
+      process.env.PATH = `${binDir}:${process.env.PATH}`
+    },
+  },
+
+  async ssh(args, rpc) {
+    const remoteHome = path.join(args.home, 'remote-home')
+    const rollout = path.join(remoteHome, '.claude', 'projects', 'proj', 'session.jsonl')
+    await fs.mkdir(path.dirname(rollout), { recursive: true })
+    await fs.copyFile(path.join(args.fixtures, 'claude-basic.jsonl'), rollout)
+
+    await fs.mkdir(path.join(args.home, '.ssh'), { recursive: true })
+    await fs.writeFile(path.join(args.home, '.ssh', 'config'), [
+      'Host fake-remote',
+      '  HostName 127.0.0.1',
+      '  User tester',
+      '  IdentityFile ~/.ssh/id_ed25519',
+      '',
+    ].join('\n'))
+    await fs.writeFile(path.join(args.home, '.ssh', 'id_ed25519'), 'NOT-A-REAL-KEY')
+
+    const listed = await rpc({ action: 'machines', refresh: true })
+    const machine = listed.machines.find(item => item.id === 'ssh:fake-remote')
+    assert(machine, `fake-remote was not discovered: ${JSON.stringify(listed.machines.map(m => m.id))}`)
+    assert(listed.keys['ssh:fake-remote']?.endsWith('id_ed25519'),
+      `the key was not resolved: ${listed.keys['ssh:fake-remote']}`)
+
+    const scan = await rpc({ action: 'sessions', force: true })
+    const rows = scan.external['ssh:fake-remote'] ?? []
+    const errors = scan.errors['ssh:fake-remote'] ?? []
+    assert(!errors.some(item => /Cannot find package .ssh2./.test(item)),
+      `the system ssh backend was not used: ${errors.join(' ; ')}`)
+    const found = rows.find(row => /session\.jsonl$/.test(row.path))
+    assert(found, `no rollout was discovered over ssh (rows ${rows.length}, errors ${JSON.stringify(errors)})`)
+
+    const paired = await rpc({
+      action: 'pair',
+      binding: { machineId: 'ssh:fake-remote', externalPath: found.path, kind: 'claude', direction: 'in', dshSessionIds: [] },
+    })
+    const result = paired.result ?? paired
+    assert(!result.error, `import over ssh failed: ${JSON.stringify(result)}`)
+    assert((result.imported ?? 0) > 0, `import over ssh brought nothing in: ${JSON.stringify(paired)}`)
+    const after = await rpc({ action: 'sessions', force: true })
+    const row = (after.dsh ?? []).find(item => item.id === paired.binding?.dshSessionIds?.[0])
+    assert(row?.count > 0, `the ssh import produced no readable DSH session: ${JSON.stringify(row)}`)
+    assert(/List the files/.test(row.preview ?? ''), `the ssh import lost its text: ${row.preview}`)
+    log(`ssh ok: discovered ${rows.length} rollout(s), imported ${result.imported} record(s), ${row.count} message(s)`)
+    return { discovered: rows.length, imported: result.imported, messages: row.count }
+  },
+
   async reimport(args, rpc) {
     const format = FORMATS[0]
     const { row, binding } = await importFile(rpc, args, format)
@@ -219,6 +305,18 @@ const scenarios = {
   },
 }
 
+/** A cheap content fingerprint of the fixture directory. */
+async function fingerprint(dir) {
+  const entries = await fs.readdir(dir, { withFileTypes: true })
+  const parts = []
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isFile()) continue
+    const body = await fs.readFile(path.join(dir, entry.name))
+    parts.push(`${entry.name}:${body.length}:${body.toString('base64').slice(0, 24)}`)
+  }
+  return parts.join('|')
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   const index = argv.indexOf('--scenario')
@@ -228,7 +326,14 @@ async function main() {
   const scenario = scenarios[name]
   if (!scenario) throw new Error(`unknown scenario: ${name} (have ${Object.keys(scenarios).join(', ')})`)
   log(`scenario ${name}`)
+  await scenarios.prepare?.[name]?.(args)
+  // Fixtures are shared input. A scenario that writes into them would corrupt
+  // later runs (and silently "fix" a failing assertion), so any change is a
+  // failure rather than something to notice by eye in a diff.
+  const before = await fingerprint(args.fixtures)
   const result = await withHarness(args, rpc => scenario(args, rpc))
+  const after = await fingerprint(args.fixtures)
+  assert(before === after, `the ${name} scenario modified the fixtures in ${args.fixtures}`)
   log(`OK ${name} ${JSON.stringify(result)}`)
 }
 

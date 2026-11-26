@@ -83,3 +83,32 @@ test('scanMachine(): a genuine home-resolution failure still says so', async () 
   const { errors } = await scanMachine({ id: 'ssh:box' }, { transport })
   assert.match(errors[0], /cannot resolve home: sftp: realpath failed/)
 })
+
+test('scanMachine(): an unreachable machine reports once and stops probing roots', async () => {
+  // Regression: a refused/timed-out connection used to be retried for the home
+  // directory and then for every tool root, so one dead host cost four full
+  // connect attempts (~70-110s against real hosts) and produced four copies of
+  // the same error.
+  const transport = memoryTransport({}, { home: undefined })
+  let attempts = 0
+  const refused = new Error('ssh: connect to host 10.0.0.9 port 22: Connection refused')
+  refused.code = 'ECONNREFUSED'
+  transport.home = async () => { attempts++; throw refused }
+  transport.list = async () => { attempts++; throw refused }
+  const { sessions, errors } = await scanMachine({ id: 'ssh:dead' }, { transport })
+  assert.deepEqual(sessions, [])
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /Connection refused/)
+  assert.equal(attempts, 1)
+})
+
+test('scanMachine(): a transport error code is not rewritten as a home problem', async () => {
+  const transport = memoryTransport({}, { home: undefined })
+  const auth = new Error('ubuntu@10.0.0.9: Permission denied (publickey).')
+  auth.code = 'EAUTH'
+  transport.home = async () => { throw auth }
+  const { errors } = await scanMachine({ id: 'ssh:box' }, { transport })
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /Permission denied/)
+  assert.ok(!/cannot resolve home/.test(errors[0]))
+})

@@ -38,7 +38,7 @@ jobs:
           for required in package/index.js package/client.js package/cordis.patch.yml \
                            package/lib/events.js package/lib/transports.js \
                            package/lib/opencode.js package/lib/pool.js \
-                           package/lib/hostkey.js \
+                           package/lib/openssh.js package/lib/hostkey.js \
                            package/locale/en.json package/locale/zh.json \
                            package/LICENSE; do
             grep -qx "$required" /tmp/packed.txt || { echo "missing from tarball: $required"; exit 1; }
@@ -195,6 +195,14 @@ jobs:
           node scripts/ci/scenario.mjs --scenario keys \
             --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
             --home "$RUNNER_TEMP/home-keys" --port 5407 --fixtures "$PWD/test/fixtures"
+      # The only scenario that exercises the remote half: a stand-in `ssh` on
+      # PATH stands in for a server, so discovery, reading and importing over the
+      # SSH transport all run without needing a reachable host.
+      - name: Scenario "ssh" (a remote session is discovered and imported over ssh)
+        run: |
+          node scripts/ci/scenario.mjs --scenario ssh \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-ssh" --port 5408 --fixtures "$PWD/test/fixtures"
       - name: Upload harness logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
