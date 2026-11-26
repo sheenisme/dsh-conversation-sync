@@ -183,6 +183,11 @@ jobs:
           node scripts/ci/scenario.mjs --scenario reimport \
             --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
             --home "$RUNNER_TEMP/home-reimport" --port 5405
+      - name: Scenario "direction" (sync-all honours the requested direction)
+        run: |
+          node scripts/ci/scenario.mjs --scenario direction \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-direction" --port 5406
       - name: Upload harness logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

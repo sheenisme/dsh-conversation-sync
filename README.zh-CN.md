@@ -92,7 +92,7 @@ DSH 版本里启动起来：
 | --- | --- |
 | `unit` | 纯模块行为正确，覆盖最老的受支持 Node 与最新的 24.x |
 | `compatibility` | 插件在**最近五个 DSH 版本**上都能激活并成功导入会话 |
-| `functional` | 最新两个版本上的完整流程：导入、导出、五种工具格式、失败上报、重复同步不重复导入 |
+| `functional` | 最新两个版本上的完整流程：导入、导出、五种工具格式、失败上报、重复同步不重复导入，以及显式指定的同步方向确实生效 |
 
 两个 harness 任务用 `scripts/ci/install-dsh.mjs` 装指定版本的 DSH（连 npm 不会
 自动装的 runtime peers 一起装上），再用 `scripts/ci/boot-check.mjs` /

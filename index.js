@@ -63,7 +63,12 @@ const failureSchema = z.object({
 const stateSchema = z.object({
   bindingId: z.string(),
   cursor: z.object({ offset: z.number(), pending: z.string() }).optional(),
+  // Where DSH appends next (import cursor). Separate from outSeqs on purpose:
+  // sharing one map meant an import advanced the export cursor, so the first
+  // export after an import found "nothing new" and wrote an empty file.
   dshSeqs: z.record(z.number()).default({}),
+  // Where the external file was last written to (export cursor).
+  outSeqs: z.record(z.number()).default({}),
   externalSize: z.number().optional(),
   externalMtimeMs: z.number().optional(),
   lastSyncAt: z.number().optional(),
@@ -126,7 +131,7 @@ export async function apply(ctx, config = {}) {
     logger,
   })
 
-  const getState = id => statesTable.get(id) ?? { bindingId: id, dshSeqs: {}, importedIds: [] }
+  const getState = id => statesTable.get(id) ?? { bindingId: id, dshSeqs: {}, outSeqs: {}, importedIds: [] }
   const saveState = state => statesTable.put(state.bindingId, state)
   const getBinding = id => bindingsTable.get(id)
   const allBindings = () => [...bindingsTable.entries()].map(([, value]) => value)
@@ -328,7 +333,7 @@ export async function apply(ctx, config = {}) {
       if (!(await dshSessionExists({ persistence, sessions: sessionStore, sessionId }))) {
         throw new Error(`DSH session ${sessionId} does not exist; re-select it on the left`)
       }
-      const fromSeq = state.dshSeqs[sessionId] ?? 0
+      const fromSeq = state.outSeqs?.[sessionId] ?? 0
       const messages = await readDshSessionMessages({ persistence, sessions: sessionStore, sessionId, fromSeq, strict: true })
       for (const message of messages) {
         const text = String(message.text ?? '')
@@ -339,7 +344,10 @@ export async function apply(ctx, config = {}) {
           `dsh:${sessionId}:${message.seq}`,
         )
       }
-      if (messages.length) state.dshSeqs[sessionId] = Math.max(fromSeq, ...messages.map(message => message.seq))
+      if (messages.length) {
+        state.outSeqs ??= {}
+        state.outSeqs[sessionId] = Math.max(fromSeq, ...messages.map(message => message.seq))
+      }
       written += messages.length
     }
     if (!content) return 0
@@ -419,11 +427,14 @@ export async function apply(ctx, config = {}) {
     }
   }
 
-  const syncAll = async (forced = false) => {
+  const syncAll = async (forced = false, direction) => {
     const results = []
     for (const binding of allBindings()) {
       if (forced || (binding.enabled && binding.autoSync)) {
-        results.push(await syncBinding(binding, forced))
+        // The direction has to be passed through: without it every binding falls
+        // back to its own stored direction, so "sync out" from the UI silently
+        // ran an import instead.
+        results.push(await syncBinding(binding, forced, direction))
         // Yield between bindings so SSH polling cannot starve the UI/agent loop.
         await new Promise(resolve => setImmediate(resolve))
       }
@@ -594,7 +605,7 @@ export async function apply(ctx, config = {}) {
           if (!binding) return Response.json({ error: 'binding not found' }, { status: 404 })
           return Response.json({ results: [await syncBinding(binding, true, body.direction)] })
         }
-        return Response.json({ results: await syncAll(true) })
+        return Response.json({ results: await syncAll(true, body.direction) })
       }
 
       default:

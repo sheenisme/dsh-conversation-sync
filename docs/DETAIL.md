@@ -141,6 +141,12 @@ component's session log).
   it to `verify` to refuse unknown servers too, or `off` to skip the check. This
   is deliberately not silent: the refusal is reported through the normal failure
   diagnostics with what to do about it.
+- Two cursors are tracked per binding, and they are different numbers. `dshSeqs`
+  records how far the DSH session has been written (the import cursor); `outSeqs`
+  records how much of it has already been copied into the external file (the
+  export cursor). Sharing one map was a real bug: importing a conversation pushed
+  the shared cursor to the end, so the first export afterwards believed there was
+  nothing new and wrote an empty file.
 - Connections are pooled per machine: discovery runs every 30 seconds and each
   sync poll needs the same host, so without a pool every tick opened a fresh TCP
   connection, key exchange and authentication for every hop. A pooled

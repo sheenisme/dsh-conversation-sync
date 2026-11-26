@@ -136,6 +136,30 @@ const scenarios = {
     return { reason: result.failure.reason, stale: staleResult.error }
   },
 
+  /**
+   * "Sync all" with an explicit direction must honour that direction for every
+   * binding, rather than falling back to each binding's stored direction. The
+   * UI's per-direction buttons call exactly this, so a regression here means the
+   * user clicks Export and gets an Import.
+   */
+  async direction(args, rpc) {
+    const { row, binding } = await importFile(rpc, args, FORMATS[0])
+    const target = path.join(args.home, 'direction-out.jsonl')
+    // Re-point the existing binding at a fresh file, keeping direction 'in' so a
+    // stray fallback is visible: an import would write nothing to the file.
+    await rpc({ action: 'pair', binding: { id: binding.id, machineId: 'local', externalPath: target, kind: 'claude', direction: 'in', dshSessionIds: [row.id] } })
+    const all = await rpc({ action: 'sync', direction: 'out' })
+    const result = all.results?.find(item => item.id === binding.id) ?? all.results?.[0]
+    assert(result, `sync-all returned nothing for the binding: ${JSON.stringify(all)}`)
+    assert(!result.error, `directional sync failed: ${JSON.stringify(result)}`)
+    assert(result.direction === 'out', `sync-all ignored the requested direction: ${JSON.stringify(result)}`)
+    assert((result.written ?? 0) > 0, `sync-all wrote nothing to ${target}: ${JSON.stringify(result)}`)
+    const text = await fs.readFile(target, 'utf8')
+    assert(text.trim().length > 0, 'the exported file is empty')
+    log(`direction ok: sync-all honoured "out" for a binding stored as "in" (${result.written} message(s))`)
+    return { written: result.written, direction: result.direction }
+  },
+
   async reimport(args, rpc) {
     const format = FORMATS[0]
     const { row, binding } = await importFile(rpc, args, format)

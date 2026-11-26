@@ -130,7 +130,7 @@ plugin into real DSH releases and boots them:
 | --- | --- |
 | `unit` | the pure modules behave, on the oldest supported Node and the latest 24.x |
 | `compatibility` | the plugin activates and imports a conversation on each of the **five most recent DSH releases** |
-| `functional` | the user journey on the two newest releases: import, export, all five tool formats, failure reporting, no duplicate re-import |
+| `functional` | the user journey on the two newest releases: import, export, all five tool formats, failure reporting, no duplicate re-import, and that an explicit sync direction is honoured |
 
 Both harness jobs run `scripts/ci/install-dsh.mjs` (installs a specific DSH
 version with the runtime peers npm does not provide) and then
