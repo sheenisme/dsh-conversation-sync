@@ -1,0 +1,53 @@
+{
+  "name": "dsh-conversation-sync",
+  "version": "1.0.0",
+  "description": "Import and bidirectionally sync conversations from Claude Code, Codex CLI, generic JSONL and DeepSeek exports into DSH, including remote SSH sources.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sheenisme/dsh-conversation-sync.git"
+  },
+  "homepage": "https://github.com/sheenisme/dsh-conversation-sync#readme",
+  "bugs": {
+    "url": "https://github.com/sheenisme/dsh-conversation-sync/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "conversation-sync",
+    "session-import",
+    "ssh"
+  ],
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/*.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md",
+    "docs/DETAIL.md"
+  ],
+  "icon": "./icon.svg",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ]
+    }
+  }
+}

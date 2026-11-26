@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "title": "Conversation sync",
+    "description": "Import and bidirectionally sync conversations from Claude Code, Codex CLI, generic JSONL and DeepSeek exports into DSH, including remote SSH sources.",
+    "detail": "docs/DETAIL.md"
+  },
+  "summary": "Conversation sync",
+  "panel": {
+    "title": "Conversation sync",
+    "subtitle": "Import external conversations and keep both sides in sync",
+    "addSource": "Add source",
+    "editSource": "Edit source",
+    "removeSource": "Remove source",
+    "syncNow": "Sync now",
+    "confirmRemove": "Remove this source?",
+    "cancel": "Cancel",
+    "save": "Save",
+    "saved": "Saved",
+    "lastSync": "Last sync:",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "noSources": "No sources configured yet. Add a source to import conversations.",
+    "loading": "Loading…",
+    "saving": "Saving…",
+    "saved": "Saved",
+    "error": "Error",
+    "fields": {
+      "name": "Name",
+      "kind": "Source type",
+      "path": "Path or URL",
+      "remote": "Remote SSH source",
+      "sshHost": "SSH host",
+      "sshUser": "SSH user",
+      "sshPort": "SSH port",
+      "sshKeyRef": "SSH private key credential reference",
+      "pollMs": "Poll interval (ms)",
+      "writeBack": "Write back to original files",
+      "autoSync": "Enable real-time sync"
+    },
+    "kinds": {
+      "claude": "Claude Code",
+      "codex": "Codex CLI",
+      "jsonl": "Generic JSONL",
+      "deepseekExport": "DeepSeek export ZIP"
+    },
+    "warnings": {
+      "writeBack": "Warning: write-back edits the original tool's live files. Keep backups; data loss is possible."
+    }
+  }
+}

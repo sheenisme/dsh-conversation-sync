@@ -1,0 +1,4 @@
+- insert:
+    - id: conversation-sync
+      name: 'dsh-conversation-sync'
+      config: {}

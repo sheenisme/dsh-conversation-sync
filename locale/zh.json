@@ -1,0 +1,50 @@
+{
+  "meta": {
+    "title": "会话同步",
+    "description": "从 Claude Code、Codex CLI、通用 JSONL 和 DeepSeek 导出导入会话到 DSH，并支持通过 SSH 访问远端目录与双向实时同步。",
+    "detail": "docs/DETAIL.md"
+  },
+  "summary": "会话同步",
+  "panel": {
+    "title": "会话同步",
+    "subtitle": "导入外部会话并保持两端同步",
+    "addSource": "添加来源",
+    "editSource": "编辑来源",
+    "removeSource": "删除来源",
+    "syncNow": "立即同步",
+    "confirmRemove": "确定删除这个来源？",
+    "cancel": "取消",
+    "save": "保存",
+    "saved": "已保存",
+    "lastSync": "上次同步：",
+    "enabled": "已启用",
+    "disabled": "已停用",
+    "noSources": "尚未配置来源。添加一个来源即可开始导入会话。",
+    "loading": "加载中…",
+    "saving": "保存中…",
+    "saved": "已保存",
+    "error": "错误",
+    "fields": {
+      "name": "名称",
+      "kind": "来源类型",
+      "path": "路径或 URL",
+      "remote": "远端 SSH 来源",
+      "sshHost": "SSH 主机",
+      "sshUser": "SSH 用户",
+      "sshPort": "SSH 端口",
+      "sshKeyRef": "SSH 私钥凭据引用",
+      "pollMs": "轮询间隔（毫秒）",
+      "writeBack": "写回原始文件",
+      "autoSync": "启用实时同步"
+    },
+    "kinds": {
+      "claude": "Claude Code",
+      "codex": "Codex CLI",
+      "jsonl": "通用 JSONL",
+      "deepseekExport": "DeepSeek 导出 ZIP"
+    },
+    "warnings": {
+      "writeBack": "警告：写回会直接修改原工具的活跃文件。请务必保留备份，可能发生数据丢失。"
+    }
+  }
+}
