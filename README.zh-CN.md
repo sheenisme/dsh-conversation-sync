@@ -48,7 +48,53 @@
 | --- | --- |
 | Claude Code | `~/.claude/projects/<slug>/<sessionId>.jsonl` |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| WorkBuddy / CodeBuddy | `~/.workbuddy/projects/**`、`~/.workbuddy-ai/projects/**`、`~/.codebuddy/projects/**` |
+| TRAE | `~/.trae/cli/**`、`~/.trae-cn/cli/**` |
+| Antigravity | `~/.gemini/antigravity{,-cli,-ide}/brain/<uuid>/.system_generated/logs/transcript.jsonl` |
+| OpenCode | `~/.local/share/opencode/opencode.db`（SQLite） |
 | 通用 JSONL | 每行含 `role` 与 `content`/`text` 的任意 JSONL 文件 |
 | DeepSeek 导出 | 网页导出 ZIP，`manifest.json` 中 `export_format_version: 3`（仅导入） |
 
+OpenCode 与 DeepSeek 导出**只能导入**：OpenCode 的会话存在活动中的 SQLite
+数据库里（插件往里写不安全），DeepSeek 导出 ZIP 是快照而不是工具能继续的会话。
+这两个来源请选方向 `in`，面板在选 `out` 时会直接拒绝并说明原因。
+
+TRAE 会把每个用户回合写两遍——一次是真正的 `event_msg`，一次是请求回显——回显
+在读取时被丢弃，所以问题不会重复出现。Antigravity 的 transcript 里混着真正的
+对话、harness 步骤日志（`MODEL/GENERIC`）和系统通知，后两者被过滤掉，用户文本
+外层的 `<USER_REQUEST>` 包裹也会被剥掉。
+
 同步模型、事件形状与存储细节见 [docs/DETAIL.md](docs/DETAIL.md)。
+
+## 测试与 CI
+
+```bash
+npm test                      # 81 个单元测试，node:test，无需网络或 DSH
+```
+
+单元测试覆盖的都是纯函数部分——各工具的适配器（每种格式一份 fixture）、DSH
+事件的构造与校验、`.ssh/config` 解析、会话扫描、回退与失败诊断、主机密钥处理、
+OpenCode 的 SQLite 读取，以及 SSH 传输的跳板链规划。
+
+单元测试证明不了插件在真实 harness 里能用，所以
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) 还会把打好的插件装进真实的
+DSH 版本里启动起来：
+
+| 任务 | 证明什么 |
+| --- | --- |
+| `unit` | 纯模块行为正确，覆盖最老的受支持 Node 与最新的 24.x |
+| `compatibility` | 插件在**最近五个 DSH 版本**上都能激活并成功导入会话 |
+| `functional` | 最新两个版本上的完整流程：导入、导出、五种工具格式、失败上报、重复同步不重复导入 |
+
+两个 harness 任务用 `scripts/ci/install-dsh.mjs` 装指定版本的 DSH（连 npm 不会
+自动装的 runtime peers 一起装上），再用 `scripts/ci/boot-check.mjs` /
+`scripts/ci/scenario.mjs` 建临时 profile、启动 `dsh web`、等健康输出、在有 bundle
+没激活时直接失败、用面板同款 cookie 认证，然后打真实的 RPC 接口。
+
+本地对任意已安装的 DSH 也可以跑：
+
+```bash
+node scripts/ci/install-dsh.mjs --version 0.2.2-rc.5 --dir /tmp/dsh
+node scripts/ci/boot-check.mjs --dsh /tmp/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js \
+  --tarball "$(npm pack --silent)" --home /tmp/dsh-home
+```

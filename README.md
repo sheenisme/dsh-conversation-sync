@@ -79,8 +79,59 @@ appended to DSH, the message tells you to remove them via the DSH UI.
 | --- | --- |
 | Claude Code | `~/.claude/projects/<slug>/<sessionId>.jsonl` |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| WorkBuddy / CodeBuddy | `~/.workbuddy/projects/**`, `~/.workbuddy-ai/projects/**`, `~/.codebuddy/projects/**` |
+| TRAE | `~/.trae/cli/**`, `~/.trae-cn/cli/**` |
+| Antigravity | `~/.gemini/antigravity{,-cli,-ide}/brain/<uuid>/.system_generated/logs/transcript.jsonl` |
+| OpenCode | `~/.local/share/opencode/opencode.db` (SQLite) |
 | Generic JSONL | any JSONL file with `role` + `content`/`text` per line |
 | DeepSeek export | web export ZIP with `manifest.json` `export_format_version: 3` (import-only) |
 
+OpenCode and the DeepSeek export are **import-only**: OpenCode keeps sessions in
+a live SQLite database (writing into it from a plugin is unsafe) and a DeepSeek
+export ZIP is a snapshot, not a conversation the tool can resume. Choose
+direction `in` for those two; the panel refuses `out` with an explanation.
+
+TRAE writes each user turn twice — once as a real `event_msg` and once as a
+request echo — so the echo is dropped on read instead of showing the question
+twice. Antigravity transcripts mix real conversation with harness step logs
+(`MODEL/GENERIC`) and system notices; those are filtered, and the
+`<USER_REQUEST>` wrapper is stripped from user text.
+
 See [docs/DETAIL.md](docs/DETAIL.md) for the sync model, event shapes and
 storage details.
+
+## Tests and CI
+
+```bash
+npm test                      # 81 unit tests, node:test, no network or DSH needed
+```
+
+The unit suite covers the parts that are pure functions — the tool adapters
+(with a fixture per format), DSH event building and validation, `.ssh/config`
+parsing, session discovery, rollback and failure diagnostics, host-key handling,
+OpenCode's SQLite reads, and the SSH transport's jump-chain planning.
+
+Unit tests cannot prove the plugin works *inside* a harness, so
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) also installs the packed
+plugin into real DSH releases and boots them:
+
+| Job | What it proves |
+| --- | --- |
+| `unit` | the pure modules behave, on the oldest supported Node and the latest 24.x |
+| `compatibility` | the plugin activates and imports a conversation on each of the **five most recent DSH releases** |
+| `functional` | the user journey on the two newest releases: import, export, all five tool formats, failure reporting, no duplicate re-import |
+
+Both harness jobs run `scripts/ci/install-dsh.mjs` (installs a specific DSH
+version with the runtime peers npm does not provide) and then
+`scripts/ci/boot-check.mjs` / `scripts/ci/scenario.mjs`, which bootstrap a
+throwaway profile, start `dsh web`, wait for its health line, fail when a bundle
+did not activate, authenticate with the cookie the panel uses, and drive the
+real RPC endpoint.
+
+Run them locally against any installed DSH:
+
+```bash
+node scripts/ci/install-dsh.mjs --version 0.2.2-rc.5 --dir /tmp/dsh
+node scripts/ci/boot-check.mjs --dsh /tmp/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js \
+  --tarball "$(npm pack --silent)" --home /tmp/dsh-home
+```

@@ -9,7 +9,7 @@ import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
 import { createHostKeyGuard } from './lib/hostkey.js'
 import { scanMachine } from './lib/discovery.js'
-import { listDshSessions, readDshSessionMessages } from './lib/dsh-sessions.js'
+import { listDshSessions, readDshSessionMessages, dshSessionExists } from './lib/dsh-sessions.js'
 import { SyncRollback, diagnoseFailure } from './lib/rollback.js'
 
 export const name = 'dsh-conversation-sync'
@@ -312,8 +312,13 @@ export async function apply(ctx, config = {}) {
     let written = 0
     let content = ''
     for (const sessionId of binding.dshSessionIds) {
+      // A stale or mistyped session id used to read back as zero messages and
+      // report a successful sync that wrote nothing. Fail with the reason.
+      if (!(await dshSessionExists({ persistence, sessions: sessionStore, sessionId }))) {
+        throw new Error(`DSH session ${sessionId} does not exist; re-select it on the left`)
+      }
       const fromSeq = state.dshSeqs[sessionId] ?? 0
-      const messages = await readDshSessionMessages({ persistence, sessions: sessionStore, sessionId, fromSeq })
+      const messages = await readDshSessionMessages({ persistence, sessions: sessionStore, sessionId, fromSeq, strict: true })
       for (const message of messages) {
         const text = String(message.text ?? '')
         if (!text) continue
@@ -345,6 +350,10 @@ export async function apply(ctx, config = {}) {
       path: binding.externalPath,
       machine: machine ?? { id: binding.machineId, label: binding.machineId, kind: 'local' },
       transportKind: machine?.kind === 'ssh' ? 'ssh' : 'local',
+      // Lets the diagnostics tell "our own data dir is not writable" apart from
+      // "the conversation file's parent cannot be created" - same mkdir error,
+      // completely different fix.
+      dataRoot: ROOT,
     }
     let transport
     let rollback

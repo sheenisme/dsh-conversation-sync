@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Unit tests have no DSH dependency: they cover the pure modules (adapters,
+  # event building, ssh config parsing, discovery, rollback, host key handling,
+  # SQLite reads and the SSH transport's jump-chain planning).
+  unit:
+    name: Unit tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.9.0', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run unit tests
+        run: npm test
+      - name: Verify the packed tarball contains what the plugin needs
+        run: |
+          npm pack --silent > /dev/null
+          tar -tzf dsh-conversation-sync-*.tgz | sort > /tmp/packed.txt
+          cat /tmp/packed.txt
+          for required in package/index.js package/client.js package/cordis.patch.yml \
+                           package/lib/events.js package/lib/transports.js \
+                           package/lib/opencode.js package/locale/en.json package/locale/zh.json; do
+            grep -qx "$required" /tmp/packed.txt || { echo "missing from tarball: $required"; exit 1; }
+          done
+
+  # Ask the registry which releases are actually the most recent, instead of
+  # hardcoding a list that silently rots into "the five versions from whenever
+  # someone last edited this file". Also resolves the Node version each release
+  # needs (they are not all the same) and records any release skipped as broken.
+  matrix:
+    name: Resolve version matrix
+    runs-on: ubuntu-latest
+    outputs:
+      compatibility: ${{ steps.matrix.outputs.compatibility }}
+      functional: ${{ steps.matrix.outputs.functional }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Resolve the five most recent DSH releases
+        id: matrix
+        run: |
+          set -euo pipefail
+          node scripts/ci/recent-versions.mjs --count 5 > /tmp/recent.json
+          cat /tmp/recent.json
+          echo "compatibility=$(cat /tmp/recent.json)" >> "$GITHUB_OUTPUT"
+          # The functional scenarios are the slow, end-to-end job; run them on the
+          # two newest releases only, which is what "the last two versions" means.
+          node -e '
+            const all = require("/tmp/recent.json").include;
+            const newest = all.slice(-2);
+            require("fs").writeFileSync(
+              process.env.GITHUB_OUTPUT,
+              "functional=" + JSON.stringify({ include: newest }) + "\n",
+              { flag: "a" },
+            );
+            console.log("functional matrix:", JSON.stringify(newest));
+          '
+
+  # Compatibility: the same plugin installed into several real DSH releases and
+  # booted for real. A version passes only when the harness activates the
+  # plugin (no "did not activate" warning) AND a conversation imports into a
+  # DSH session. This job answers "does it still work on the last five versions?".
+  compatibility:
+    name: DSH ${{ matrix.dsh }}
+    runs-on: ubuntu-latest
+    needs: [unit, matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.compatibility) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Install plugin dependencies and build the tarball
+        run: |
+          npm install --no-audit --no-fund
+          npm pack --silent
+      - name: Install DSH ${{ matrix.dsh }}
+        run: |
+          node scripts/ci/install-dsh.mjs --version '${{ matrix.dsh }}' --dir "$RUNNER_TEMP/dsh" | tee /tmp/install.log
+          # The installer's last line is the bin path.
+          tail -1 /tmp/install.log > /tmp/dsh-bin.txt
+          test -f "$(cat /tmp/dsh-bin.txt)"
+      - name: Boot the plugin in a real profile and import a conversation
+        run: |
+          node scripts/ci/boot-check.mjs \
+            --dsh "$(cat /tmp/dsh-bin.txt)" \
+            --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home" \
+            --port 5399
+      - name: Upload harness logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-check-${{ matrix.dsh }}
+          path: |
+            /tmp/*.log
+            ${{ runner.temp }}/home/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Functional scenarios on the two newest releases: the whole user journey,
+  # driven through the real RPC surface the panel uses.
+  functional:
+    name: Scenarios ${{ matrix.dsh }}
+    runs-on: ubuntu-latest
+    needs: [unit, matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.functional) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Install plugin dependencies and build the tarball
+        run: |
+          npm install --no-audit --no-fund
+          npm pack --silent
+      - name: Install DSH ${{ matrix.dsh }}
+        run: |
+          node scripts/ci/install-dsh.mjs --version '${{ matrix.dsh }}' --dir "$RUNNER_TEMP/dsh" | tee /tmp/install.log
+          tail -1 /tmp/install.log > /tmp/dsh-bin.txt
+      - name: Scenario - import a real Claude Code rollout
+        run: |
+          node scripts/ci/scenario.mjs --scenario import \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-import" --port 5401
+      - name: Scenario - export a DSH session back to a tool file
+        run: |
+          node scripts/ci/scenario.mjs --scenario export \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-export" --port 5402
+      - name: Scenario - every supported tool format imports
+        run: |
+          node scripts/ci/scenario.mjs --scenario formats \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-formats" --port 5403
+      - name: Scenario - a failing sync reports why and how to retry
+        run: |
+          node scripts/ci/scenario.mjs --scenario failure \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-failure" --port 5404
+      - name: Scenario - re-importing does not duplicate messages
+        run: |
+          node scripts/ci/scenario.mjs --scenario reimport \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-reimport" --port 5405
+      - name: Upload harness logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scenarios-${{ matrix.dsh }}
+          path: |
+            /tmp/*.log
+            ${{ runner.temp }}/home-*/**
+          retention-days: 7
+          if-no-files-found: ignore

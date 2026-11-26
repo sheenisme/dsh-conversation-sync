@@ -78,10 +78,26 @@ test('SyncRollback.fail(): DSH restore requires truncateFrom, else manual-cleanu
 
 test('diagnoseFailure: a mkdir failure names the plugin data directory, not the conversation file', () => {
   const error = Object.assign(new Error("EPERM: operation not permitted, mkdir '/Users/x/.dsh/conversation-sync'"), { code: 'EPERM' })
-  const { reason, conditions } = diagnoseFailure(error, { path: '/home/u/session.jsonl', transportKind: 'local' })
+  const { reason, conditions } = diagnoseFailure(error, {
+    path: '/home/u/session.jsonl', transportKind: 'local', dataRoot: '/Users/x/.dsh/conversation-sync',
+  })
   assert.match(reason, /plugin data directory/)
   assert.ok(!/session\.jsonl/.test(reason), 'reason must not blame the conversation file')
   assert.ok(conditions.some(c => /DSH_HOME/.test(c)), 'conditions must mention DSH_HOME')
+})
+
+// The same EPERM-on-mkdir text also appears when a plugin cannot create the
+// parent of an external conversation file. Blaming the plugin data directory
+// there sends the user to the wrong fix, so the branch must distinguish them.
+test('diagnoseFailure: a mkdir failure outside the data root blames the destination', () => {
+  const error = Object.assign(new Error("EPERM: operation not permitted, mkdir '/proc/nope'"), { code: 'EPERM' })
+  const { reason, conditions } = diagnoseFailure(error, {
+    path: '/proc/nope/out.jsonl', transportKind: 'local', dataRoot: '/Users/x/.dsh/conversation-sync',
+  })
+  assert.match(reason, /cannot create the directory for \/proc\/nope\/out\.jsonl/)
+  assert.ok(!/plugin data directory/.test(reason), 'must not blame the plugin data dir for an external path')
+  assert.ok(conditions.some(c => /\/proc\/nope/.test(c)), 'conditions must name the real directory')
+  assert.ok(conditions.every(c => !/DSH_HOME/.test(c)), 'an external path is not fixed by DSH_HOME')
 })
 
 test('diagnoseFailure: local permission denial does not tell the user to check an SSH account', () => {
