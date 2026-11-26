@@ -16,6 +16,7 @@
  *   formats   every supported tool format imports through the same path
  *   failure   a broken source fails with a reason and recovery conditions
  *   reimport  syncing twice does not duplicate already-imported content
+ *   keys      SSH keys resolve credential -> IdentityFile -> ~/.ssh defaults
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -158,6 +159,46 @@ const scenarios = {
     assert(text.trim().length > 0, 'the exported file is empty')
     log(`direction ok: sync-all honoured "out" for a binding stored as "in" (${result.written} message(s))`)
     return { written: result.written, direction: result.direction }
+  },
+
+  /**
+   * SSH key resolution order, over the same RPC the panel uses. A host that
+   * already works from a terminal must not need a hand-typed key: the plugin
+   * prefers a saved credential, then the host's IdentityFile, then the
+   * conventional ~/.ssh defaults.
+   */
+  async keys(args, rpc) {
+    const sshDir = path.join(args.home, '.ssh')
+    await fs.mkdir(sshDir, { recursive: true })
+    await fs.writeFile(path.join(sshDir, 'config'), [
+      'Host prod',
+      '  HostName 10.0.0.5',
+      '  User deploy',
+      '  IdentityFile ~/.ssh/prod_ed25519',
+      '',
+      'Host bastion',
+      '  HostName 10.0.0.1',
+      '  User jump',
+      '',
+      'Host db',
+      '  HostName 10.0.0.9',
+      '  User dba',
+      '  ProxyJump bastion',
+      '',
+    ].join('\n'))
+    await fs.writeFile(path.join(sshDir, 'prod_ed25519'), 'NOT-A-REAL-KEY')
+    await fs.writeFile(path.join(sshDir, 'id_ed25519'), 'NOT-A-REAL-KEY')
+
+    // The profile booted before ~/.ssh/config existed, so ask for a re-read —
+    // this is the same path the panel's refresh button takes.
+    const { machines, keys } = await rpc({ action: 'machines', refresh: true })
+    const byId = Object.fromEntries(machines.map(machine => [machine.id, machine]))
+    assert(byId['ssh:prod'], `prod was not discovered: ${JSON.stringify(machines.map(m => m.id))}`)
+    assert(byId['ssh:db']?.via?.includes('ssh:bastion'), 'the jump host was not linked to the target')
+    assert(keys['ssh:prod']?.endsWith('prod_ed25519'), `prod should use its IdentityFile, got ${keys['ssh:prod']}`)
+    assert(keys['ssh:bastion']?.endsWith('id_ed25519'), `bastion should fall back to the default key, got ${keys['ssh:bastion']}`)
+    log(`keys ok: prod -> ${keys['ssh:prod']}, bastion -> ${keys['ssh:bastion']}`)
+    return { prod: keys['ssh:prod'], bastion: keys['ssh:bastion'] }
   },
 
   async reimport(args, rpc) {

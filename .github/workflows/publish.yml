@@ -1,0 +1,69 @@
+name: Publish
+
+# Tag-driven release: `git tag v1.2.3 && git push origin v1.2.3` is the only
+# action needed. The workflow refuses to publish unless the tag matches the
+# version in package.json and the full unit suite passes, so a mistyped tag
+# cannot ship a half-verified build.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write # npm provenance
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify the tagged commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+      - name: Unit tests
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+      - name: The tag must match package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+          echo "tag and package.json agree on $version"
+      - name: The published tarball must contain the runtime files
+        run: |
+          npm pack --silent >/dev/null
+          tar -tf ./*.tgz > /tmp/files.txt
+          for required in index.js client.js cordis.patch.yml lib/events.js lib/transports.js lib/pool.js lib/opencode.js locale/en.json locale/zh.json LICENSE; do
+            if ! grep -q "package/$required" /tmp/files.txt; then
+              echo "::error::the tarball is missing $required"
+              exit 1
+            fi
+          done
+
+  publish:
+    name: Publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+      # The token must be a granular access token with "read and write" and
+      # "bypass 2FA" — npm rejects a plain session token for publishing even
+      # when the account has 2FA disabled.
+      - name: Publish
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

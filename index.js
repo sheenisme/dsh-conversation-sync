@@ -3,7 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import Schema from '@deepseek-ai/schemastery'
-import { LocalTransport, transportForMachine } from './lib/transports.js'
+import { LocalTransport, transportForMachine, previewKeyPath } from './lib/transports.js'
 import { createTransportPool } from './lib/pool.js'
 import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
 import { buildEvents, toLiveInput } from './lib/events.js'
@@ -461,8 +461,12 @@ export async function apply(ctx, config = {}) {
         } catch (error) {
           byMachine[machine.id] = []
           errors[machine.id] = [String(error?.message ?? error)]
-          if (error?.message?.includes('credential')) {
-            errors[machine.id].push(`save the private-key PATH for this machine (credential ${keyRefFor(machine)})`)
+          const message = String(error?.message ?? error)
+          if (/no SSH private key|cannot read the SSH private key|credential/i.test(message)) {
+            errors[machine.id].push(
+              `save the private-key PATH for this machine (credential ${keyRefFor(machine)}), ` +
+              `or add 'IdentityFile' for it in ~/.ssh/config`,
+            )
           }
         }
       }
@@ -473,13 +477,15 @@ export async function apply(ctx, config = {}) {
     }
   }
 
+  // What key each machine will actually use, so the panel can show the path
+  // instead of a bare "not configured". Falls back to IdentityFile and then to
+  // the conventional ~/.ssh defaults, matching what the transport does.
   const keyPaths = async () => {
     const result = {}
     for (const machine of machinesCache.machines) {
       if (machine.kind !== 'ssh') continue
       try {
-        const resolved = await ctx.credentials.resolve(keyRefFor(machine))
-        result[machine.id] = resolved?.value ?? ''
+        result[machine.id] = (await previewKeyPath(machine, ctx.credentials)) ?? ''
       } catch {
         result[machine.id] = ''
       }
@@ -552,6 +558,10 @@ export async function apply(ctx, config = {}) {
         return Response.json({ ready: !!bindingsTable, syncing, scanning, bindings: bindingsTable ? allBindings().length : 0 })
 
       case 'machines':
+        // Re-read ~/.ssh/config on demand: a host added to it should show up
+        // without restarting DSH, and the panel refreshes this list every few
+        // seconds anyway.
+        if (body.refresh) await refreshMachines()
         return Response.json({ machines: machinesCache.machines, warnings: machinesCache.warnings, keys: await keyPaths() })
 
       case 'sessions': {

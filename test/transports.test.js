@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { planJumpChain, LocalTransport, transportForMachine } from '../lib/transports.js'
+import { planJumpChain, LocalTransport, SshTransport, transportForMachine } from '../lib/transports.js'
 
 const hop = (name, port = 22) => ({ host: name, port, username: name, privateKeyPath: `/keys/${name}` })
 
@@ -68,34 +68,163 @@ test('transportForMachine: local machine never needs a credential', async () => 
   assert.equal(transport.kind, 'local')
 })
 
-test('transportForMachine: a missing SSH key fails with the credential ref name', async () => {
+test('transportForMachine: a saved credential wins over every fallback', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-cred-'))
+  try {
+    const saved = path.join(dir, 'saved-key')
+    await fs.writeFile(saved, 'PRIVATE')
+    const credentials = { resolve: async () => ({ value: saved }) }
+    const transport = await transportForMachine(
+      { id: 'ssh:box', kind: 'ssh', host: 'box', user: 'u', identityFile: '/keys/from-config' },
+      [{ id: 'ssh:box', kind: 'ssh', host: 'box' }],
+      credentials,
+    )
+    assert.equal(transport.privateKeyPath, saved)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('transportForMachine: a stale saved path falls back instead of blocking the machine', async () => {
+  // A saved credential pointing at a key that has since moved used to make the
+  // machine produce zero sessions with only "cannot read ... key" to explain it.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-stale-'))
+  try {
+    const good = path.join(dir, 'id_ed25519')
+    await fs.writeFile(good, 'PRIVATE')
+    const warnings = []
+    const transport = await transportForMachine(
+      { id: 'ssh:box', kind: 'ssh', host: 'box', user: 'u' },
+      [{ id: 'ssh:box', kind: 'ssh', host: 'box' }],
+      { resolve: async () => ({ value: path.join(dir, 'moved-away.pem') }) },
+      { warn: message => warnings.push(message) },
+      undefined,
+      { defaultKeyDir: dir },
+    )
+    assert.equal(transport.privateKeyPath, good)
+    assert.equal(warnings.length, 1)
+    assert.match(warnings[0], /does not exist/)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('transportForMachine: without a credential the IdentityFile from ~/.ssh/config is used', async () => {
+  // The user asked for a default key path: a host that already works from a
+  // terminal must not need a hand-typed key in the panel.
   const credentials = { resolve: async () => undefined }
+  const transport = await transportForMachine(
+    { id: 'ssh:box', kind: 'ssh', host: 'box', user: 'u', identityFile: '/keys/from-config' },
+    [{ id: 'ssh:box', kind: 'ssh', host: 'box' }],
+    credentials,
+    undefined,
+    undefined,
+    { defaultKeyDir: '/nonexistent' },
+  )
+  assert.equal(transport.privateKeyPath, '/keys/from-config')
+})
+
+test('transportForMachine: without a credential the conventional ~/.ssh key is used', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-keys-'))
+  try {
+    const key = path.join(dir, 'id_ed25519')
+    await fs.writeFile(key, 'PRIVATE')
+    const transport = await transportForMachine(
+      { id: 'ssh:box', kind: 'ssh', host: 'box', user: 'u' },
+      [{ id: 'ssh:box', kind: 'ssh', host: 'box' }],
+      { resolve: async () => undefined },
+      undefined,
+      undefined,
+      { defaultKeyDir: dir },
+    )
+    assert.equal(transport.privateKeyPath, key)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('transportForMachine: no key anywhere explains what to do, not which ref is missing', async () => {
   await assert.rejects(
-    transportForMachine({ id: 'ssh:box', kind: 'ssh', host: 'box', user: 'u' }, [{ id: 'ssh:box', kind: 'ssh', host: 'box' }], credentials),
-    /conversation-sync\/ssh-key\/ssh:box/,
+    transportForMachine(
+      { id: 'ssh:box', kind: 'ssh', host: 'box', user: 'u', label: 'box' },
+      [{ id: 'ssh:box', kind: 'ssh', host: 'box' }],
+      { resolve: async () => undefined },
+      undefined,
+      undefined,
+      { defaultKeyDir: '/nonexistent' },
+    ),
+    error => /no SSH private key for 'box'/.test(error.message)
+      && /IdentityFile/.test(error.message)
+      && /id_ed25519/.test(error.message),
   )
 })
 
-test('transportForMachine: each hop resolves its own key and the chain order is kept', async () => {
-  const asked = []
-  const credentials = {
-    resolve: async ref => {
-      asked.push(ref)
-      return { value: `/keys/${ref.split('/').pop()}` }
-    },
+test('transportForMachine: a jump host also falls back to its own IdentityFile', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-hopkey-'))
+  try {
+    const targetKey = path.join(dir, 'target')
+    await fs.writeFile(targetKey, 'PRIVATE')
+    const machines = [
+      { id: 'ssh:bastion', kind: 'ssh', hostname: 'bastion', user: 'b', identityFile: '/keys/bastion' },
+      { id: 'ssh:target', kind: 'ssh', hostname: 'target', user: 't', via: ['ssh:bastion'] },
+    ]
+    const transport = await transportForMachine(machines[1], machines, {
+      resolve: async ref => (ref.endsWith('ssh:target') ? { value: targetKey } : undefined),
+    })
+    assert.equal(transport.via[0].privateKeyPath, '/keys/bastion')
+    assert.equal(transport.privateKeyPath, targetKey)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
   }
-  const machines = [
-    { id: 'ssh:outer', kind: 'ssh', hostname: 'outer.example', user: 'o', port: 2200 },
-    { id: 'ssh:inner', kind: 'ssh', host: 'inner.example', user: 'i' },
-    { id: 'ssh:target', kind: 'ssh', host: 'target.example', user: 't', via: ['ssh:outer', 'ssh:inner'] },
-  ]
-  const transport = await transportForMachine(machines[2], machines, credentials)
-  assert.equal(transport.via.length, 2)
-  assert.deepEqual(transport.via.map(step => step.host), ['outer.example', 'inner.example'])
-  assert.deepEqual(transport.via.map(step => step.privateKeyPath), ['/keys/ssh:outer', '/keys/ssh:inner'])
-  assert.equal(transport.privateKeyPath, '/keys/ssh:target')
-  // the target's key is never reused for a hop
-  assert.equal(new Set(asked).size, 3)
+})
+
+test('SshTransport: a missing key file names the key path, not the remote home', async () => {
+  // Regression: the old code let a bare ENOENT escape, which discovery wrapped
+  // as "cannot resolve home: ENOENT … open '/home/me/.ssh/key.pem'" — it sent a
+  // user hunting for a home-directory problem when the cause was a typo.
+  const transport = new SshTransport({ host: 'box', username: 'u', privateKeyPath: '/definitely/missing/key.pem' })
+  await assert.rejects(transport.home(), error => {
+    assert.match(error.message, /cannot read the SSH private key '\/definitely\/missing\/key.pem'/)
+    assert.match(error.message, /no such file/)
+    assert.equal(error.keyPath, '/definitely/missing/key.pem')
+    return true
+  })
+})
+
+test('transportForMachine: each hop resolves its own key and the chain order is kept', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-chain-'))
+  try {
+    // Every credential resolves to a real file, otherwise the stale-path
+    // fallback would (correctly) take over.
+    const write = async name => { const file = path.join(dir, name); await fs.writeFile(file, 'PRIVATE'); return file }
+    const keys = {
+      'ssh:outer': await write('outer'),
+      'ssh:inner': await write('inner'),
+      'ssh:target': await write('target'),
+    }
+    const asked = []
+    const credentials = {
+      resolve: async ref => {
+        asked.push(ref)
+        const id = ref.split('/').pop()
+        return keys[id] ? { value: keys[id] } : undefined
+      },
+    }
+    const machines = [
+      { id: 'ssh:outer', kind: 'ssh', hostname: 'outer.example', user: 'o', port: 2200 },
+      { id: 'ssh:inner', kind: 'ssh', host: 'inner.example', user: 'i' },
+      { id: 'ssh:target', kind: 'ssh', host: 'target.example', user: 't', via: ['ssh:outer', 'ssh:inner'] },
+    ]
+    const transport = await transportForMachine(machines[2], machines, credentials)
+    assert.equal(transport.via.length, 2)
+    assert.deepEqual(transport.via.map(step => step.host), ['outer.example', 'inner.example'])
+    assert.deepEqual(transport.via.map(step => step.privateKeyPath), [keys['ssh:outer'], keys['ssh:inner']])
+    assert.equal(transport.privateKeyPath, keys['ssh:target'])
+    // the target's key is never reused for a hop
+    assert.equal(new Set(asked).size, 3)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('LocalTransport.mkdir(): a file in the way is an error, not a hang', async () => {

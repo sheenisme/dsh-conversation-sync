@@ -17,7 +17,8 @@ over SSH.
 
 ## UI at a glance
 
-The settings page (**Plugins → Conversation sync**) is a two-column picker:
+The panel opens from **Settings → Conversation sync** (its own sidebar entry) or
+from **Plugins → Conversation sync**. It is a two-column picker:
 
 - **Left:** every DSH session in this installation.
 - **Right:** sessions found on the selected machine. Switch machines with the
@@ -89,10 +90,11 @@ space, and so on. Nothing is left for you to guess.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-The suite covers the pure modules — adapters, event building, `.ssh/config`
+108 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics, host keys, SQLite reads, jump-chain
-planning and the connection pool. CI additionally installs the packed plugin
-into five real DSH releases and drives the actual RPC surface.
+planning, the connection pool, and the browser half through a stub module
+loader. CI additionally installs the packed plugin into five real DSH releases
+and drives the actual RPC surface.
 
 See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job proves and how
 to run the harness locally.
@@ -119,7 +121,3 @@ This plugin stands on work done by others. In particular:
 - **[dsh-plugin-cc](https://github.com/cpj-dev/dsh-plugin-cc)** (MIT) — a clean
   example of a bundle's shape (`cordis.patch.yml`, client module, locale
   registration) and of how to structure tests around a DSH plugin.
-
-Format compatibility was established by reading the session files those tools
-actually write, not by documentation — several of the quirks documented in
-[docs/DETAIL.md](docs/DETAIL.md) are undocumented upstream behaviour.

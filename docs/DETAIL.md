@@ -42,10 +42,23 @@ skipped; a real read failure is reported per machine. Each
 discovered session carries an id, kind, name, preview, message count and byte
 size, and is shown on the right-hand column of the UI for the selected machine.
 
-For an SSH machine, store the **path** to the private key as a DSH credential
-(`conversation-sync/ssh-key/<machineId>`) via the UI's `Set key path` button.
-The key contents never appear in plugin configuration; the transport reads the
-file at connection time. A key is needed for every hop in a `via[]` chain.
+For an SSH machine the private key is resolved in a fixed order, so a host that
+already works from a terminal usually needs no configuration at all:
+
+1. the **path** saved for that machine as a DSH credential
+   (`conversation-sync/ssh-key/<machineId>`, set through the UI's
+   `Set key path` button);
+2. the host's own `IdentityFile` from `~/.ssh/config`;
+3. the conventional `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, first one that
+   exists.
+
+Only the path is stored; key contents never enter plugin configuration, and the
+file is read at connection time. Every hop in a `via[]` chain resolves its own
+key by the same rules. When none of the three applies, the error names the
+machine and lists those options rather than reporting a missing credential
+reference. If a path exists but cannot be read, the error names the key file —
+a wrong path used to surface as `cannot resolve home: ENOENT … /home/me/.ssh/…`,
+which pointed at the remote home directory instead of the local key.
 
 ## Sync model
 
@@ -168,12 +181,16 @@ component's session log).
 
 ## Testing
 
-`npm test` runs 96 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 108 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
 pins the listing contract (a row's `count` is messages, never raw events) and the
-`strict` read that an export needs.
+`strict` read that an export needs. `test/client.test.js` loads `client.js`
+through a stub module loader so the browser half is testable too: it fails when a
+service is used but missing from `inject` (that was a real bug — without
+`sessions` the sidebar never learned about a freshly imported session), when the
+`settings.section` entry is not registered, or when an `en`/`zh` key drifts.
 
 `scripts/ci/` holds the harness-level checks, which are what catch format bugs
 that unit fixtures cannot:
@@ -183,7 +200,7 @@ that unit fixtures cannot:
 | `install-dsh.mjs` | installs one DSH version so it can actually run under plain Node — it reads `@deepseek-ai/dsh-app-boot`'s peer ranges from the registry, because npm does not install the peers of a transitive package |
 | `harness.mjs` | shared profile bootstrap, health-line wait, activation check and auth-cookie handshake |
 | `boot-check.mjs` | "does this DSH version support the plugin": install, boot, import, read back |
-| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `reimport`, `direction` — the user journey over the real RPC surface |
+| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `reimport`, `direction`, `keys` — the user journey over the real RPC surface |
 
 `.github/workflows/ci.yml` runs three jobs:
 

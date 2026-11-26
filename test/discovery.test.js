@@ -60,3 +60,26 @@ test('scanMachine(): a real read failure is still reported', async () => {
   assert.ok(errors.length > 0)
   assert.match(errors[0], /permission denied/)
 })
+
+test('scanMachine(): a bad SSH key is reported as a key problem, not as "cannot resolve home"', async () => {
+  // Regression: transport.home() used to be the first call, so every connect
+  // failure — including "cannot read the SSH private key ..." — was rewritten
+  // as "cannot resolve home: ENOENT open '.../key.pem'". That pointed the user
+  // at the remote home directory when the real fault was the local key path.
+  const transport = memoryTransport({}, { home: undefined })
+  const keyError = new Error("cannot read the SSH private key '/home/me/.ssh/k.pem': no such file — check the path")
+  keyError.code = 'ENOENT'
+  keyError.keyPath = '/home/me/.ssh/k.pem'
+  transport.home = async () => { throw keyError }
+  const { errors } = await scanMachine({ id: 'ssh:box' }, { transport })
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /cannot read the SSH private key/)
+  assert.ok(!/cannot resolve home/.test(errors[0]))
+})
+
+test('scanMachine(): a genuine home-resolution failure still says so', async () => {
+  const transport = memoryTransport({}, { home: undefined })
+  transport.home = async () => { throw new Error('sftp: realpath failed') }
+  const { errors } = await scanMachine({ id: 'ssh:box' }, { transport })
+  assert.match(errors[0], /cannot resolve home: sftp: realpath failed/)
+})

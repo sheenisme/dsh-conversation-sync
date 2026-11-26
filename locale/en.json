@@ -49,5 +49,8 @@
     "warnings": {
       "writeBack": "Warning: write-back edits the original tool's live files. A backup is taken before every write and restored on failure, but data loss is still possible."
     }
+  },
+  "settings": {
+    "nav": "Conversation sync"
   }
 }

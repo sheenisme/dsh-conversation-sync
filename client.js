@@ -38,6 +38,17 @@ window.__ModuleLoader__.load({
       list: { maxHeight: 380, overflowY: 'auto' },
     }
 
+    // Materializing a session writes it to disk, but the browser sidebar is fed
+    // by the host's in-memory session list. Without this refresh the imported
+    // sessions only appear after a full page reload — which is exactly what a
+    // user reported ("imported, workspace created, no sessions shown").
+    let tr = key => en[key] ?? key
+    let hostSessions
+    const refreshDshSessions = async () => {
+      // A stale sidebar is better than a failed sync, so this never throws.
+      try { await hostSessions?.refresh?.() } catch { /* ignore */ }
+    }
+
     const titleOf = item => item?.title || item?.name || item?.id || '—'
     const shortId = id => String(id ?? '').length > 18 ? `${String(id).slice(0, 12)}…${String(id).slice(-4)}` : String(id ?? '')
 
@@ -60,7 +71,7 @@ window.__ModuleLoader__.load({
       const load = useCallback(async (force = false) => {
         try {
           const [m, sess, b] = await Promise.all([
-            rpc('machines'),
+            rpc('machines', force ? { refresh: true } : {}),
             rpc('sessions', { force }),
             rpc('bindings'),
           ])
@@ -107,6 +118,7 @@ window.__ModuleLoader__.load({
           })
           setLastResult(result.result)
           if (result.result?.failure) setError(result.result.failure.reason)
+          await refreshDshSessions()
           await load(true)
         } catch (e) { setError(e.message) } finally { setBusy(false) }
       }
@@ -116,6 +128,7 @@ window.__ModuleLoader__.load({
         try {
           const result = await rpc('sync', id ? { id, direction } : {})
           if (result.results?.length === 1) setLastResult(result.results[0])
+          await refreshDshSessions()
           await load()
         } catch (e) { setError(e.message) } finally { setBusy(false) }
       }
@@ -166,8 +179,8 @@ window.__ModuleLoader__.load({
             })),
           ] }),
           selectedMachine?.kind === 'ssh' ? jsxs('div', { style: s.row, children: [
-            jsx('span', { style: s.small, children: `${t('panel.key')}: ${keys[machineFilter] ? t('panel.keySet') : t('panel.keyMissing')}` }),
-            jsx('button', { style: s.button, onClick: () => setKeyEdit(machineFilter), children: t('panel.setKey') }),
+            jsx('span', { style: s.small, children: `${t('panel.key')}: ${keys[machineFilter] ? keys[machineFilter] : t('panel.keyMissing')}` }),
+            jsx('button', { style: s.button, onClick: () => { setKeyEdit(machineFilter); setKeyValue(keys[machineFilter] ?? '') }, children: t('panel.setKey') }),
           ] }) : null,
           keyEdit ? jsxs('div', { children: [
             jsx('label', { style: s.label, children: t('panel.keyPath') }),
@@ -268,6 +281,7 @@ window.__ModuleLoader__.load({
 
     const en = {
       summary: 'Conversation sync',
+      'settings.nav': 'Conversation sync',
       'panel.title': 'Conversation sync — bidirectional + Remote-SSH',
       'panel.subtitle': 'Left: all DSH sessions · Right: sessions on each machine · pick a direction to sync',
       'panel.refresh': 'Refresh sessions', 'panel.machines': 'Machines (from ~/.ssh/config, jump hosts included)',
@@ -287,6 +301,7 @@ window.__ModuleLoader__.load({
     }
     const zh = {
       summary: '会话同步',
+      'settings.nav': '会话同步',
       'panel.title': '会话同步 — 双向同步 + Remote-SSH',
       'panel.subtitle': '左侧：DSH 全部会话 · 右侧：各机器上的会话 · 选择方向进行同步',
       'panel.refresh': '刷新会话', 'panel.machines': '机器（来自 ~/.ssh/config，跳板机也算）',
@@ -305,13 +320,34 @@ window.__ModuleLoader__.load({
       'panel.warnings.writeBack': '警告：写回会直接修改原工具的活跃文件。每次写入前都会备份，失败时自动回滚，但仍可能发生数据丢失。',
     }
 
-    const inject = ['slots', 'locale']
+    const inject = ['slots', 'locale', 'sessions']
 
     function apply(ctx) {
+      hostSessions = ctx.sessions
       ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'conversation-sync/dictionaries')
+      // The settings slot needs a translate function of its own; the bundle
+      // config slot gets one from its props, the settings section does not.
+      try {
+        const bound = ctx.locale.bind(NS)
+        tr = key => {
+          const text = bound(key)
+          return text === key ? (en[key] ?? key) : text
+        }
+      } catch { /* keep the English dictionary fallback */ }
       ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
         name: 'plugins.bundle.config', key: PKG, locale: NS,
       }, ({ t, view }) => (view === 'summary' ? t('summary') : jsx(Page, { t })))), 'conversation-sync/page')
+
+      // Also reachable from Settings, as its own sidebar entry, so the feature
+      // is discoverable without hunting through the plugin inventory.
+      ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
+        name: 'settings.section', id: PKG, order: 45, locale: NS,
+        label: () => tr('settings.nav'),
+      }, () => jsx(Page, { t: tr }))), 'conversation-sync/settings')
+
+      ctx.effect(() => ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
+        name: 'settings.section.icon', id: PKG,
+      }, () => jsx('span', { 'data-conversation-sync-icon': true, style: { display: 'inline-flex' } }, '⇄'))), 'conversation-sync/settings-icon')
     }
 
     return { apply, inject }

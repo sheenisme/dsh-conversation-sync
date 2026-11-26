@@ -190,6 +190,11 @@ jobs:
           node scripts/ci/scenario.mjs --scenario direction \
             --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
             --home "$RUNNER_TEMP/home-direction" --port 5406
+      - name: Scenario "keys" (SSH keys resolve without hand-typing a path)
+        run: |
+          node scripts/ci/scenario.mjs --scenario keys \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-keys" --port 5407 --fixtures "$PWD/test/fixtures"
       - name: Upload harness logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
