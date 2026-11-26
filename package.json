@@ -19,6 +19,14 @@
     "ssh"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "peerDependencies": {
+    "cordis": "^4.0.1",
+    "dsh": ">=0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.0-rc.6"
+  },
   "main": "./index.js",
   "exports": {
     ".": "./index.js",

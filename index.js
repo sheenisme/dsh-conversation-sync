@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { createTransport } from './lib/transports.js'
 import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
-import { buildEvents, messagesFromEvents } from './lib/events.js'
+import { buildEvents, messagesFromEvents, toLiveInput } from './lib/events.js'
 
 export const name = 'dsh-conversation-sync'
 export const inject = ['connection', 'credentials', 'sessionPersistence', 'sessionProjectionCache', 'workspaceRegistry', 'sessions', 'storageDomain']
@@ -113,6 +113,16 @@ export async function apply(ctx) {
       isSeeded: false,
     }
     const events = buildEvents(records, { createId: randomUUID })
+    if (title) {
+      // dsh-session-title reads this log-only event. Emit it into the log so the
+      // title persists even though this session is not a live store session.
+      events.push({
+        type: 'session/title',
+        data: { title, messageSeqs: [], source: { kind: 'user' } },
+        seq: events.length,
+        time: events.at(-1)?.time ?? header.createdAt,
+      })
+    }
     const handle = await persistence.create(header)
     try {
       await handle.append(events)
@@ -123,12 +133,6 @@ export async function apply(ctx) {
     projectionCache?.coldSnapshot?.(header, 0, events)
     await ensureWorkspace(source, state)
     await workspaces.get(state.workspaceId).attachSession(id)
-    if (title) {
-      try {
-        const live = sessionStore.get(id)
-        if (live) live.append('session/title', { title, messageSeqs: [], source: { kind: 'user' } })
-      } catch { /* title is cosmetic */ }
-    }
     return { id, lastSeq: events.length }
   }
 
@@ -138,17 +142,22 @@ export async function apply(ctx) {
     if (!events.length) return startSeq
     const live = sessionStore.get(sessionId)
     if (live) {
-      for (const event of events) {
-        const input = [event.type, event.data]
-        if (event.surfaceOp) input.push({ surfaceOp: event.surfaceOp })
-        live.append(...input)
-      }
+      // Batch append so observers see all events of a turn together, preserving
+      // tool/call -> tool/result sourceEventSeqs references.
+      live.append(events.map(toLiveInput))
       await sessionStore.flush(live)
       return startSeq + events.length
     }
     const stat = await persistence.stat(sessionId)
     const seq = stat?.eventCount ?? startSeq
-    const ready = events.map(event => ({ ...event, seq: seq + events.indexOf(event) }))
+    // Rebase seq AND sourceEventSeqs if the persisted next-seq differs from
+    // the watermark we built against, keeping tool/call references valid.
+    const shift = seq - startSeq
+    const ready = events.map((event, index) => ({
+      ...event,
+      seq: startSeq + index + shift,
+      ...(event.sourceEventSeqs ? { sourceEventSeqs: event.sourceEventSeqs.map(s => s + shift) } : {}),
+    }))
     const handle = await persistence.open(sessionId, 'write')
     try {
       await handle.append(ready)
@@ -288,6 +297,10 @@ export async function apply(ctx) {
     for (const source of sourcesTable.entries()) {
       if (forced || (source[1].enabled && source[1].autoSync)) {
         results.push(await syncSource(source[1], forced))
+        // Yield to the event loop between sources so remote SSH polling of
+        // many sources cannot starve the UI/agent loop (pattern from
+        // dsh-plugin-codex-import).
+        await new Promise(resolve => setImmediate(resolve))
       }
     }
     return results
