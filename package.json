@@ -1,7 +1,7 @@
 {
   "name": "dsh-conversation-sync",
   "version": "1.0.0",
-  "description": "Import and bidirectionally sync conversations from Claude Code, Codex CLI, generic JSONL and DeepSeek exports into DSH, including remote SSH sources.",
+  "description": "Import conversations into DSH from Claude Code, Codex CLI, WorkBuddy, TRAE, Antigravity, OpenCode, generic JSONL and DeepSeek exports — and keep them in sync both ways, over SSH too.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,7 +16,12 @@
     "deepseek-harness",
     "conversation-sync",
     "session-import",
-    "ssh"
+    "ssh",
+    "workbuddy",
+    "trae",
+    "antigravity",
+    "opencode",
+    "conversation-import"
   ],
   "type": "module",
   "engines": {
@@ -77,5 +82,8 @@
         "@deepseek-ai/dsh-client-ui-plugin-manager"
       ]
     }
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
