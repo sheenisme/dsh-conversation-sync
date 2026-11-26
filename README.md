@@ -46,7 +46,9 @@ bundle ships its own `cordis.patch.yml`.
 2. The **Machines** row lists the local machine plus every host from
    `~/.ssh/config` (jump hosts included). For an SSH machine, set the
    **private-key PATH** once via `Set key path`; the path is stored as a DSH
-   credential (the key contents never enter plugin config).
+   credential (the key contents never enter plugin config). If the key has a
+   passphrase, point it at the matching `.pub` file instead: the plugin then
+   authenticates through `ssh-agent`, so the passphrase never has to be stored.
 3. Pick a machine on the right; its sessions (Claude Code, Codex CLI, DeepSeek
    export ZIPs) are discovered automatically.
 4. Select sessions on the left/right, choose a direction, and the pair becomes

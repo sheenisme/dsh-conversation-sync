@@ -272,7 +272,7 @@ window.__ModuleLoader__.load({
       'panel.subtitle': 'Left: all DSH sessions · Right: sessions on each machine · pick a direction to sync',
       'panel.refresh': 'Refresh sessions', 'panel.machines': 'Machines (from ~/.ssh/config, jump hosts included)',
       'panel.jump': 'jump host', 'panel.key': 'SSH private key', 'panel.keySet': 'configured', 'panel.keyMissing': 'not configured',
-      'panel.setKey': 'Set key path', 'panel.keyPath': 'Private-key PATH on this machine (stored as a DSH credential)',
+      'panel.setKey': 'Set key path', 'panel.keyPath': 'Private-key PATH on this machine (stored as a DSH credential). Point it at the .pub file to use ssh-agent, which is how passphrase-protected keys work.',
       'panel.dshColumn': 'DSH sessions (this installation)', 'panel.externalColumn': 'External sessions (selected machine)',
       'panel.import': '← Import to DSH', 'panel.export': 'Export to remote →', 'panel.bidirectional': '⇄ Sync both ways',
       'panel.arrowsHint': 'Select one session on each side, then choose a direction. A one-sided session is imported/exported first, then kept in sync.',

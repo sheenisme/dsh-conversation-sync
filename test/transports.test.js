@@ -135,3 +135,38 @@ test('LocalTransport.mkdir(): a path that reports ENOENT forever is reported, no
   )
   assert.ok(Date.now() - started < 5000, 'mkdir took too long; is it looping again?')
 })
+
+test('SshTransport._keyMaterial(): .pub uses ssh-agent, a private key is read from disk', async () => {
+  // A passphrase-protected key cannot be read by ssh2 without the passphrase, so
+  // the documented setup is to load it into the agent and point the plugin at the
+  // .pub file. Reading the .pub as if it were a private key would fail with a
+  // confusing parse error instead.
+  const { SshTransport } = await import('../lib/transports.js')
+  const instance = new SshTransport({ host: 'h', username: 'u' })
+
+  const previous = process.env.SSH_AUTH_SOCK
+  try {
+    process.env.SSH_AUTH_SOCK = '/tmp/fake-agent.sock'
+    const viaAgent = await instance._keyMaterial('/home/dev/.ssh/id_ed25519.pub')
+    assert.equal(viaAgent.agent, '/tmp/fake-agent.sock')
+    assert.equal(viaAgent.privateKey, undefined, 'the .pub file must not be read as key material')
+
+    delete process.env.SSH_AUTH_SOCK
+    await assert.rejects(
+      () => instance._keyMaterial('/home/dev/.ssh/id_ed25519.pub'),
+      /must be in ssh-agent, but SSH_AUTH_SOCK is not set/,
+    )
+
+    // A real private key file is still read from disk.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-key-'))
+    const keyFile = path.join(dir, 'id_ed25519')
+    await fs.writeFile(keyFile, 'KEY-BYTES')
+    const material = await instance._keyMaterial(keyFile)
+    assert.equal(material.privateKey?.toString(), 'KEY-BYTES')
+    assert.equal(material.agent, undefined)
+    await fs.rm(dir, { recursive: true, force: true })
+  } finally {
+    if (previous === undefined) delete process.env.SSH_AUTH_SOCK
+    else process.env.SSH_AUTH_SOCK = previous
+  }
+})

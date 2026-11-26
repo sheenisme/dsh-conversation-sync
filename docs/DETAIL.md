@@ -128,6 +128,10 @@ component's session log).
   version 1), tables `bindings` and `states`.
 - Machine list, discovered sessions and key-path references are held in memory
   and refreshed by the discovery tick; key paths are durable DSH credentials.
+- Authentication uses a private-key file, or `ssh-agent` when the configured
+  path ends in `.pub`. The agent path is what makes passphrase-protected keys
+  usable: ssh2 cannot decrypt them without the passphrase, and storing a
+  passphrase in plugin config would be worse than loading the key once.
 - Host keys are checked, and remembered. `known_hosts.json` lives in the plugin
   data directory and records the fingerprint of every server the plugin has
   connected to. The default `hostKeyMode` is `accept-new`: a server seen for the
