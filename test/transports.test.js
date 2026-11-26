@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { planJumpChain, LocalTransport, transportForMachine } from '../lib/transports.js'
 
 const hop = (name, port = 22) => ({ host: name, port, username: name, privateKeyPath: `/keys/${name}` })
@@ -93,4 +96,42 @@ test('transportForMachine: each hop resolves its own key and the chain order is 
   assert.equal(transport.privateKeyPath, '/keys/ssh:target')
   // the target's key is never reused for a hop
   assert.equal(new Set(asked).size, 3)
+})
+
+test('LocalTransport.mkdir(): a file in the way is an error, not a hang', async () => {
+  // Regression: `fs.mkdir(dir, {recursive:true})` walks up the path on ENOENT and
+  // retries. On some paths (Linux /proc reports ENOENT for a parent that exists)
+  // that loop never terminates and spins the CPU forever, which hung a CI job for
+  // five minutes with no error at all. Walking the components turns it into an
+  // ordinary failure the caller can report.
+  const transport = new LocalTransport()
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-mkdir-'))
+  try {
+    const blocker = path.join(root, 'blocker')
+    await fs.writeFile(blocker, 'a file\n')
+    await assert.rejects(
+      () => transport.mkdir(path.join(blocker, 'nested', 'dir')),
+      /a file is in the way|cannot create the directory/i,
+    )
+    // An existing directory chain is still fine (idempotent, like recursive mkdir).
+    const deep = path.join(root, 'a', 'b', 'c')
+    await transport.mkdir(deep)
+    await transport.mkdir(deep)
+    assert.equal((await fs.stat(deep)).isDirectory(), true)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('LocalTransport.mkdir(): a path that reports ENOENT forever is reported, not retried forever', async () => {
+  // The exact wedge: a filesystem that answers ENOENT for a parent that exists.
+  // The old code looped here; the new code reports the ENOENT for that component.
+  if (process.platform !== 'linux') return
+  const transport = new LocalTransport()
+  const started = Date.now()
+  await assert.rejects(
+    () => transport.mkdir('/proc/definitely-not-writable/x'),
+    error => error.code === 'ENOENT',
+  )
+  assert.ok(Date.now() - started < 5000, 'mkdir took too long; is it looping again?')
 })

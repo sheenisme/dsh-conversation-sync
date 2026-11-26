@@ -130,13 +130,19 @@ component's session log).
   and refreshed by the discovery tick; key paths are durable DSH credentials.
 - The SSH transport keeps one SFTP connection per machine (chained through jump
   hosts when needed) and reconnects on failure.
+- Directory creation walks the path one component at a time rather than using
+  `fs.mkdir(..., {recursive: true})`. On Linux, recursive mkdir can loop forever
+  when the filesystem answers ENOENT for a parent that exists (`/proc` does), and
+  that hung a whole sync with no error; the component walk turns it into a normal
+  reported failure. Every local filesystem call also has a 30s ceiling, so a
+  wedged mount cannot stall the poll loop indefinitely.
 - HTTP route `/api/conversation-sync/rpc` (POST) exposes `status`, `machines`,
   `sessions`, `bindings`, `setKey`, `pair`, `unbind`, `sync`. It is owner-only,
   as all DSH web routes are.
 
 ## Testing
 
-`npm test` runs 81 unit tests (`node:test`, no network). Each tool format has a
+`npm test` runs 85 unit tests (`node:test`, no network). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`

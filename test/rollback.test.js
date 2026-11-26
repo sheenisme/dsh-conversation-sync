@@ -107,3 +107,25 @@ test('diagnoseFailure: local permission denial does not tell the user to check a
   const ssh = diagnoseFailure(error, { path: '/home/u/s.jsonl', transportKind: 'ssh' })
   assert.ok(ssh.conditions.some(c => /SSH user/.test(c)))
 })
+
+test('diagnoseFailure(): a file where a directory belongs is explained, not raw errno', () => {
+  // Reproduced for real: exporting to `<a-file>/out.jsonl` failed the backup with
+  // "backup failed: ENOTDIR: not a directory, stat ...". That tells the user
+  // nothing actionable, and it is not a permission problem either.
+  const error = Object.assign(
+    new Error("ENOTDIR: not a directory, stat '/tmp/blocker/out.jsonl'"),
+    { code: 'ENOTDIR' },
+  )
+  const diagnosis = diagnoseFailure(error, { path: '/tmp/blocker/out.jsonl', transportKind: 'local' })
+  assert.match(diagnosis.reason, /a file is in the way of a directory/)
+  assert.ok(diagnosis.conditions.length > 0)
+  assert.ok(
+    diagnosis.conditions.some(condition => /must be a directory, not a file/.test(condition)),
+    `conditions should name the real fix, got ${JSON.stringify(diagnosis.conditions)}`,
+  )
+})
+
+test('diagnoseFailure(): EEXIST from mkdir takes the same file-in-the-way path', () => {
+  const error = Object.assign(new Error("EEXIST: file already exists, mkdir '/tmp/blocker'"), { code: 'EEXIST' })
+  assert.match(diagnoseFailure(error, { path: '/tmp/blocker/out.jsonl' }).reason, /a file is in the way of a directory/)
+})

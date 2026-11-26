@@ -62,18 +62,27 @@ jobs:
           set -euo pipefail
           node scripts/ci/recent-versions.mjs --count 5 > /tmp/recent.json
           cat /tmp/recent.json
-          echo "compatibility=$(cat /tmp/recent.json)" >> "$GITHUB_OUTPUT"
-          # The functional scenarios are the slow, end-to-end job; run them on the
-          # two newest releases only, which is what "the last two versions" means.
+          # Feed ONLY the include list to the matrix. The report also carries a
+          # `skipped` list, and any extra top-level key in a matrix object is
+          # treated as a dimension - which silently collapsed five combinations
+          # into one job the first time this ran.
           node -e '
-            const all = require("/tmp/recent.json").include;
-            const newest = all.slice(-2);
-            require("fs").writeFileSync(
-              process.env.GITHUB_OUTPUT,
-              "functional=" + JSON.stringify({ include: newest }) + "\n",
-              { flag: "a" },
-            );
-            console.log("functional matrix:", JSON.stringify(newest));
+            const report = require("/tmp/recent.json");
+            const fs = require("fs");
+            const out = process.env.GITHUB_OUTPUT;
+            const compatibility = { include: report["include"] };
+            // The functional scenarios are the slow end-to-end job: run them on
+            // the two newest releases only, which is what "the last two" means.
+            const functional = { include: report["include"].slice(-2) };
+            fs.writeFileSync(out, "compatibility=" + JSON.stringify(compatibility) + "\n", { flag: "a" });
+            fs.writeFileSync(out, "functional=" + JSON.stringify(functional) + "\n", { flag: "a" });
+            if (report.skipped?.length) {
+              const lines = report.skipped.map(s => `::warning::Skipped DSH ${s.dsh}: ${s.reason}`).join("\n");
+              fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, "### Skipped releases\n\n" + report.skipped.map(s => `- **${s.dsh}** - ${s.reason}`).join("\n") + "\n");
+              console.log(lines);
+            }
+            console.log("compatibility:", JSON.stringify(compatibility));
+            console.log("functional:", JSON.stringify(functional));
           '
 
   # Compatibility: the same plugin installed into several real DSH releases and

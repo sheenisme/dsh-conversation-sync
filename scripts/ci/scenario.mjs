@@ -118,8 +118,14 @@ const scenarios = {
     log(`stale session id reported: ${staleResult.error}`)
 
     // The other half of the failure surface: a real session, unwritable target.
+    // The blocker is a FILE where a directory must go: portable across macOS and
+    // Linux, and deterministic (no permissions or /proc quirks involved). Using
+    // /proc here was a mistake - on Linux the recursive mkdir Node performs for
+    // such a path can loop forever, which is what hung this scenario in CI.
     const { row } = await importFile(rpc, args, FORMATS[0])
-    const blocked = '/proc/definitely-not-writable/out.jsonl'
+    const blocker = path.join(args.home, 'a-file-not-a-directory')
+    await fs.writeFile(blocker, 'this is deliberately a file\n')
+    const blocked = path.join(blocker, 'out.jsonl')
     const write = await rpc({
       action: 'pair',
       binding: { machineId: 'local', externalPath: blocked, kind: 'claude', direction: 'out', dshSessionIds: [row.id] },

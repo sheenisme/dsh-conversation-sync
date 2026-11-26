@@ -103,7 +103,7 @@ storage details.
 ## Tests and CI
 
 ```bash
-npm test                      # 81 unit tests, node:test, no network or DSH needed
+npm test                      # 85 unit tests, node:test, no network or DSH needed
 ```
 
 The unit suite covers the parts that are pure functions — the tool adapters

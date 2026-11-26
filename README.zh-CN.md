@@ -69,7 +69,7 @@ TRAE 会把每个用户回合写两遍——一次是真正的 `event_msg`，一
 ## 测试与 CI
 
 ```bash
-npm test                      # 81 个单元测试，node:test，无需网络或 DSH
+npm test                      # 85 个单元测试，node:test，无需网络或 DSH
 ```
 
 单元测试覆盖的都是纯函数部分——各工具的适配器（每种格式一份 fixture）、DSH
