@@ -128,6 +128,15 @@ component's session log).
   version 1), tables `bindings` and `states`.
 - Machine list, discovered sessions and key-path references are held in memory
   and refreshed by the discovery tick; key paths are durable DSH credentials.
+- Host keys are checked, and remembered. `known_hosts.json` lives in the plugin
+  data directory and records the fingerprint of every server the plugin has
+  connected to. The default `hostKeyMode` is `accept-new`: a server seen for the
+  first time is trusted and recorded (trust on first use), and a *changed* key is
+  refused — which is exactly the case that matters, because a changed host key on
+  a machine you already sync with means either a rebuild or an interception. Set
+  it to `verify` to refuse unknown servers too, or `off` to skip the check. This
+  is deliberately not silent: the refusal is reported through the normal failure
+  diagnostics with what to do about it.
 - Connections are pooled per machine: discovery runs every 30 seconds and each
   sync poll needs the same host, so without a pool every tick opened a fresh TCP
   connection, key exchange and authentication for every hop. A pooled

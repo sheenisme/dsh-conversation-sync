@@ -73,6 +73,14 @@ appended to DSH, the message tells you to remove them via the DSH UI.
 > restored on failure, but data loss is still possible. Keep your own backups
 > and disable write-back for sources you cannot afford to lose.
 
+## Host keys
+
+Every server the plugin connects to is checked against `known_hosts.json` in the
+plugin data directory. A new server is trusted on first use and recorded; a
+server whose key **changed** is refused, because that is the case that matters
+(rebuild, or interception). Set `hostKeyMode` to `verify` to refuse unknown
+servers as well, or `off` to disable the check.
+
 ## Supported sources
 
 | Kind | Typical location |
@@ -109,7 +117,8 @@ npm test                      # 95 unit tests, node:test, no network or DSH need
 The unit suite covers the parts that are pure functions — the tool adapters
 (with a fixture per format), DSH event building and validation, `.ssh/config`
 parsing, session discovery, rollback and failure diagnostics, host-key handling,
-OpenCode's SQLite reads, and the SSH transport's jump-chain planning.
+OpenCode's SQLite reads, the SSH transport's jump-chain planning, and the
+per-machine connection pool (reuse, what counts as a dead connection, teardown).
 
 Unit tests cannot prove the plugin works *inside* a harness, so
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) also installs the packed
