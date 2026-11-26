@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-sync",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Import conversations into DSH from Claude Code, Codex CLI, WorkBuddy, TRAE, Antigravity, OpenCode, generic JSONL and DeepSeek exports — and keep them in sync both ways, over SSH too.",
   "license": "MIT",
   "repository": {
