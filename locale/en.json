@@ -1,42 +1,41 @@
 {
   "meta": {
     "title": "Conversation sync",
-    "description": "Import and bidirectionally sync conversations from Claude Code, Codex CLI, generic JSONL and DeepSeek exports into DSH, including remote SSH sources.",
+    "description": "Bidirectionally sync conversations across local and Remote-SSH machines discovered from ~/.ssh/config, including jump hosts. Import Claude Code, Codex CLI, generic JSONL and DeepSeek exports.",
     "detail": "docs/DETAIL.md"
   },
   "summary": "Conversation sync",
   "panel": {
-    "title": "Conversation sync",
-    "subtitle": "Import external conversations and keep both sides in sync",
-    "addSource": "Add source",
-    "editSource": "Edit source",
-    "removeSource": "Remove source",
-    "syncNow": "Sync now",
-    "confirmRemove": "Remove this source?",
+    "title": "Conversation sync — bidirectional + Remote-SSH",
+    "subtitle": "Left: all DSH sessions · Right: sessions on each machine · pick a direction to sync",
+    "refresh": "Refresh sessions",
+    "machines": "Machines (from ~/.ssh/config, jump hosts included)",
+    "jump": "jump host",
+    "key": "SSH private key",
+    "keySet": "configured",
+    "keyMissing": "not configured",
+    "setKey": "Set key path",
+    "keyPath": "Private-key PATH on this machine (stored as a DSH credential)",
+    "dshColumn": "DSH sessions (this installation)",
+    "externalColumn": "External sessions (selected machine)",
+    "import": "← Import to DSH",
+    "export": "Export to remote →",
+    "bidirectional": "⇄ Sync both ways",
+    "arrowsHint": "Select one session on each side, then choose a direction. A one-sided session is imported/exported first, then kept in sync.",
+    "bindings": "Active sync bindings",
+    "bound": "bound:",
+    "externalOnly": "No DSH session yet — use Import to create one, or select a DSH session on the left before exporting.",
+    "noDsh": "No DSH sessions found.",
+    "noExternal": "No sessions found on this machine. Configure the SSH key and refresh.",
+    "noBindings": "No bindings yet. Pick two sessions above and choose a direction.",
+    "lastSync": "Last sync:",
+    "failure": "Sync failed:",
+    "pickLeft": "Select a DSH session on the left first.",
+    "pickRight": "Select an external session on the right first.",
+    "removeSource": "Remove binding",
+    "confirmRemove": "Remove this sync binding?",
     "cancel": "Cancel",
     "save": "Save",
-    "saved": "Saved",
-    "lastSync": "Last sync:",
-    "enabled": "Enabled",
-    "disabled": "Disabled",
-    "noSources": "No sources configured yet. Add a source to import conversations.",
-    "loading": "Loading…",
-    "saving": "Saving…",
-    "saved": "Saved",
-    "error": "Error",
-    "fields": {
-      "name": "Name",
-      "kind": "Source type",
-      "path": "Path or URL",
-      "remote": "Remote SSH source",
-      "sshHost": "SSH host",
-      "sshUser": "SSH user",
-      "sshPort": "SSH port",
-      "sshKeyRef": "SSH private key credential reference",
-      "pollMs": "Poll interval (ms)",
-      "writeBack": "Write back to original files",
-      "autoSync": "Enable real-time sync"
-    },
     "kinds": {
       "claude": "Claude Code",
       "codex": "Codex CLI",
@@ -44,7 +43,7 @@
       "deepseekExport": "DeepSeek export ZIP"
     },
     "warnings": {
-      "writeBack": "Warning: write-back edits the original tool's live files. Keep backups; data loss is possible."
+      "writeBack": "Warning: write-back edits the original tool's live files. A backup is taken before every write and restored on failure, but data loss is still possible."
     }
   }
 }

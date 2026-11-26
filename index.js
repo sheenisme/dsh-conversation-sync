@@ -2,9 +2,13 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { createTransport } from './lib/transports.js'
+import { LocalTransport, transportForMachine } from './lib/transports.js'
 import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
-import { buildEvents, messagesFromEvents, toLiveInput } from './lib/events.js'
+import { buildEvents, toLiveInput } from './lib/events.js'
+import { discoverMachines } from './lib/sshconfig.js'
+import { scanMachine } from './lib/discovery.js'
+import { listDshSessions, readDshSessionMessages } from './lib/dsh-sessions.js'
+import { SyncRollback, diagnoseFailure } from './lib/rollback.js'
 
 export const name = 'dsh-conversation-sync'
 export const inject = ['connection', 'credentials', 'sessionPersistence', 'sessionProjectionCache', 'workspaceRegistry', 'sessions', 'storageDomain']
@@ -14,54 +18,65 @@ const ROOT = path.join(os.homedir(), '.dsh', 'conversation-sync')
 const WORKSPACE_ROOT = path.join(ROOT, 'workspaces')
 const BACKUP_ROOT = path.join(ROOT, 'backups')
 const KINDS = ['claude', 'codex', 'jsonl', 'deepseekExport']
+const DIRECTIONS = ['in', 'out', 'both']
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
+const SCAN_TTL_MS = 15_000
+const SCAN_INTERVAL_MS = 30_000
+const POLL_INTERVAL_MS = 2_000
 
-const sourceSchema = z.object({
+const bindingSchema = z.object({
   id: z.string(),
   name: z.string(),
+  machineId: z.string(),
+  externalPath: z.string(),
   kind: z.enum(KINDS),
-  remote: z.boolean().default(false),
-  path: z.string(),
-  sshHost: z.string().optional(),
-  sshUser: z.string().optional(),
-  sshPort: z.number().optional(),
-  sshKeyRef: z.string().optional(),
-  pollMs: z.number().optional(),
+  dshSessionIds: z.array(z.string()).default([]),
+  direction: z.enum(DIRECTIONS).default('both'),
+  keyRef: z.string().optional(),
+  pollMs: z.number().min(500).default(2000),
   autoSync: z.boolean().default(true),
-  writeBack: z.boolean().default(true),
   enabled: z.boolean().default(true),
 })
 
+const failureSchema = z.object({
+  reason: z.string(),
+  conditions: z.array(z.string()),
+  at: z.number(),
+  error: z.string().optional(),
+  snapshotId: z.string().optional(),
+  backupPaths: z.array(z.string()).default([]),
+  restored: z.object({ external: z.boolean(), dsh: z.boolean() }).optional(),
+  cleanup: z.array(z.string()).default([]),
+})
+
 const stateSchema = z.object({
-  sourceId: z.string(),
+  bindingId: z.string(),
   cursor: z.object({ offset: z.number(), pending: z.string() }).optional(),
-  sessionId: z.string().optional(),
-  sessionIds: z.array(z.string()).optional(),
-  importedIds: z.array(z.string()).optional(),
-  lastSeq: z.number().optional(),
-  dshSeq: z.number().optional(),
-  fileSize: z.number().optional(),
-  fileMtimeMs: z.number().optional(),
-  workspaceId: z.string().optional(),
+  dshSeqs: z.record(z.number()).default({}),
+  externalSize: z.number().optional(),
+  externalMtimeMs: z.number().optional(),
   lastSyncAt: z.number().optional(),
   lastError: z.string().optional(),
+  lastFailure: failureSchema.optional(),
+  workspaceId: z.string().optional(),
+  importedIds: z.array(z.string()).default([]),
 })
 
 const domain = {
   name: 'conversation_sync',
   version: 1,
   tables: {
-    sources: { valueSchema: sourceSchema },
+    bindings: { valueSchema: bindingSchema },
     states: { valueSchema: stateSchema },
   },
 }
 
 function safeId(value) {
-  return String(value).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80)
+  return String(value).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'unknown'
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
+function dirOf(machine, filePath) {
+  return machine?.kind === 'ssh' ? path.posix.dirname(filePath) : path.dirname(filePath)
 }
 
 export async function apply(ctx) {
@@ -70,52 +85,70 @@ export async function apply(ctx) {
   const persistence = ctx.sessionPersistence
   const workspaces = ctx.workspaceRegistry
   const projectionCache = ctx.get('sessionProjectionCache')
+
   let storage
-  let sourcesTable
+  let bindingsTable
   let statesTable
-  const reverse = new Map() // DSH session id -> source id
-  const dirty = new Set() // source ids needing write-back
+  let machinesCache = { machines: [{ id: 'local', label: 'Local machine', kind: 'local' }], warnings: [] }
+  let externalCache = { at: 0, byMachine: {}, errors: {}, dsh: [] }
+  let scanning = false
   let syncing = false
 
-  const refreshReverse = () => {
-    reverse.clear()
-    for (const [, state] of statesTable.entries()) {
-      for (const id of [state.sessionId, ...(state.sessionIds ?? [])].filter(Boolean)) {
-        reverse.set(id, state.sourceId)
+  const dirty = new Set()
+  const lastPoll = new Map()
+  const localTransport = new LocalTransport()
+
+  const getState = id => statesTable.get(id) ?? { bindingId: id, dshSeqs: {}, importedIds: [] }
+  const saveState = state => statesTable.put(state.bindingId, state)
+  const getBinding = id => bindingsTable.get(id)
+  const allBindings = () => [...bindingsTable.entries()].map(([, value]) => value)
+  const machineById = id => machinesCache.machines.find(machine => machine.id === id)
+  const keyRefFor = machine => `conversation-sync/ssh-key/${machine.id}`
+
+  const refreshMachines = async () => {
+    try {
+      machinesCache = await discoverMachines()
+    } catch (error) {
+      machinesCache = {
+        machines: [{ id: 'local', label: 'Local machine', kind: 'local' }],
+        warnings: [`machine discovery failed: ${error?.message ?? error}`],
       }
     }
+    return machinesCache
   }
 
-  const getState = id => statesTable.get(id) ?? { sourceId: id }
-  const saveState = state => statesTable.put(state.sourceId, state)
-  const getSource = id => sourcesTable.get(id)
+  // -------------------------------------------------------- transport helpers
 
-  // -------------------------------------------------------- session helpers
+  const transportFor = async (machine, keyRef) => {
+    if (!machine) throw new Error('unknown machine; refresh the machine list and retry')
+    return transportForMachine(machine, machinesCache.machines, ctx.credentials, logger, keyRef)
+  }
 
-  const ensureWorkspace = async (source, state) => {
+  // ---------------------------------------------------------- session helpers
+
+  const ensureWorkspace = async (binding, state) => {
     if (state.workspaceId && workspaces.get(state.workspaceId)) return state.workspaceId
-    const dir = path.join(WORKSPACE_ROOT, `${safeId(source.kind)}-${safeId(source.id)}`)
-    await (await createTransport({ remote: false }, ctx.credentials, logger)).mkdir(dir)
-    const ws = await workspaces.create(dir, `会话导入 · ${source.name}`)
+    const dir = path.join(WORKSPACE_ROOT, safeId(binding.machineId))
+    await localTransport.mkdir(dir)
+    const label = machineById(binding.machineId)?.label ?? binding.machineId
+    const ws = await workspaces.create(dir, `会话同步 · ${label}`)
     state.workspaceId = ws.id
     await saveState(state)
     return ws.id
   }
 
   /** Materialize a brand-new DSH session from normalized records. */
-  const createSession = async (source, state, records, title) => {
+  const createSession = async (binding, state, records, title) => {
     const id = `conversation-${randomUUID()}`
     const header = {
       version: 4,
       id,
-      createdAt: records.find(r => r.ts)?.ts ?? Date.now(),
-      cwd: path.join(WORKSPACE_ROOT, `${safeId(source.kind)}-${safeId(source.id)}`),
+      createdAt: records.find(record => record.ts)?.ts ?? Date.now(),
+      cwd: path.join(WORKSPACE_ROOT, safeId(binding.machineId)),
       isSeeded: false,
     }
     const events = buildEvents(records, { createId: randomUUID })
     if (title) {
-      // dsh-session-title reads this log-only event. Emit it into the log so the
-      // title persists even though this session is not a live store session.
       events.push({
         type: 'session/title',
         data: { title, messageSeqs: [], source: { kind: 'user' } },
@@ -131,32 +164,28 @@ export async function apply(ctx) {
       await handle.close()
     }
     projectionCache?.coldSnapshot?.(header, 0, events)
-    await ensureWorkspace(source, state)
-    await workspaces.get(state.workspaceId).attachSession(id)
+    await ensureWorkspace(binding, state)
+    await workspaces.get(state.workspaceId)?.attachSession(id)
     return { id, lastSeq: events.length }
   }
 
-  /** Append events to an existing imported session (live first, then persistence). */
+  /** Append events to an existing imported session (live first, persistence second). */
   const appendSession = async (sessionId, records, startSeq) => {
     const events = buildEvents(records, { startSeq, createId: randomUUID })
     if (!events.length) return startSeq
     const live = sessionStore.get(sessionId)
     if (live) {
-      // Batch append so observers see all events of a turn together, preserving
-      // tool/call -> tool/result sourceEventSeqs references.
       live.append(events.map(toLiveInput))
       await sessionStore.flush(live)
       return startSeq + events.length
     }
     const stat = await persistence.stat(sessionId)
     const seq = stat?.eventCount ?? startSeq
-    // Rebase seq AND sourceEventSeqs if the persisted next-seq differs from
-    // the watermark we built against, keeping tool/call references valid.
     const shift = seq - startSeq
     const ready = events.map((event, index) => ({
       ...event,
       seq: startSeq + index + shift,
-      ...(event.sourceEventSeqs ? { sourceEventSeqs: event.sourceEventSeqs.map(s => s + shift) } : {}),
+      ...(event.sourceEventSeqs ? { sourceEventSeqs: event.sourceEventSeqs.map(value => value + shift) } : {}),
     }))
     const handle = await persistence.open(sessionId, 'write')
     try {
@@ -168,213 +197,325 @@ export async function apply(ctx) {
     return seq + ready.length
   }
 
-  /** Read DSH-origin messages from a session above a seq watermark. */
-  const readDshMessages = async (sessionId, fromSeq) => {
-    const live = sessionStore.get(sessionId)
-    if (live) {
-      const log = live.log ?? []
-      return log.filter(event => event.seq > fromSeq && MESSAGE_TYPES.has(event.type))
-    }
-    try {
-      const handle = await persistence.open(sessionId, 'read')
-      try {
-        const { events } = await handle.read(Math.max(0, fromSeq))
-        return (events ?? []).filter(event => event.seq > fromSeq && MESSAGE_TYPES.has(event.type))
-      } finally {
-        await handle.close()
-      }
-    } catch {
-      return []
-    }
+  const dshFacade = {
+    getSeq: async sessionId => {
+      const live = sessionStore.get(sessionId)
+      if (live) return live.log?.length ?? 0
+      const stat = await persistence.stat(sessionId)
+      return stat?.eventCount ?? 0
+    },
+    // DSH has no public truncate API for third-party plugins. Restore of the
+    // DSH side is therefore reported for manual cleanup instead of editing
+    // persistence files directly (which would risk corrupting the log).
   }
 
-  // ------------------------------------------------------------ sync engine
+  // ------------------------------------------------------------- sync engine
 
-  const syncJsonlSource = async (source, state, transport) => {
-    const file = source.path
-    const delta = await readJsonlDelta(transport, file, source.kind, state.cursor)
-    if (delta.absent) {
-      const stat = await transport.stat(file)
-      if (!stat) throw new Error(`source file not found: ${file}`)
+  const syncIn = async (binding, state, transport) => {
+    if (binding.kind === 'deepseekExport') {
+      const stat = await transport.stat(binding.externalPath)
+      if (!stat) throw new Error(`export file not found: ${binding.externalPath}`)
+      if (state.externalSize === stat.size && state.externalMtimeMs === stat.mtimeMs && state.importedIds.length) return 0
+      const bytes = await transport.read(binding.externalPath)
+      const sessions = await parseDeepSeekExport(bytes, randomUUID)
+      let imported = 0
+      for (const session of sessions) {
+        if (state.importedIds.includes(session.id)) continue
+        if (!session.records.length) continue
+        const created = await createSession(binding, state, session.records, session.title ?? binding.name)
+        binding.dshSessionIds.push(created.id)
+        state.dshSeqs[created.id] = created.lastSeq
+        state.importedIds.push(session.id)
+        imported++
+      }
+      state.externalSize = stat.size
+      state.externalMtimeMs = stat.mtimeMs
+      if (imported) await bindingsTable.put(binding.id, binding)
+      return imported
     }
-    if (!state.sessionId) {
-      const created = await createSession(source, state, delta.records, source.name)
-      state.sessionId = created.id
-      state.lastSeq = created.lastSeq
-      state.dshSeq = created.lastSeq
+
+    const delta = await readJsonlDelta(transport, binding.externalPath, binding.kind, state.cursor)
+    if (delta.absent) throw new Error(`source file not found: ${binding.externalPath}`)
+    if (!binding.dshSessionIds.length) {
+      const created = await createSession(binding, state, delta.records, binding.name)
+      binding.dshSessionIds.push(created.id)
+      state.dshSeqs[created.id] = created.lastSeq
+      await bindingsTable.put(binding.id, binding)
     } else if (delta.records.length) {
-      state.lastSeq = await appendSession(state.sessionId, delta.records, state.lastSeq ?? 0)
+      const sessionId = binding.dshSessionIds[0]
+      state.dshSeqs[sessionId] = await appendSession(sessionId, delta.records, state.dshSeqs[sessionId] ?? 0)
     }
     state.cursor = delta.cursor
-    const stat = await transport.stat(file)
-    state.fileSize = stat?.size
-    state.fileMtimeMs = stat?.mtimeMs
+    const stat = await transport.stat(binding.externalPath)
+    state.externalSize = stat?.size
+    state.externalMtimeMs = stat?.mtimeMs
     return delta.records.length
   }
 
-  const syncDeepSeekExport = async (source, state, transport) => {
-    const stat = await transport.stat(source.path)
-    if (!stat) throw new Error(`export file not found: ${source.path}`)
-    if (state.fileSize === stat.size && state.fileMtimeMs === stat.mtimeMs) return 0
-    const bytes = await transport.read(source.path)
-    const sessions = await parseDeepSeekExport(bytes, randomUUID)
-    state.sessionIds = state.sessionIds ?? []
-    state.importedIds = state.importedIds ?? []
-    let imported = 0
-    for (const session of sessions) {
-      if (state.importedIds.includes(session.id)) continue
-      const records = session.records
-      if (!records.length) continue
-      const created = await createSession(source, state, records, session.title ?? source.name)
-      state.sessionIds.push(created.id)
-      state.importedIds.push(session.id)
-      imported++
+  const syncOut = async (binding, state, transport, machine) => {
+    if (binding.kind === 'deepseekExport') {
+      throw new Error('DeepSeek export ZIP is read-only: choose direction "in" (import) for this source')
     }
-    state.fileSize = stat.size
-    state.fileMtimeMs = stat.mtimeMs
-    return imported
-  }
-
-  const writeBack = async (source, state, transport) => {
-    if (source.kind === 'deepseekExport' || !source.writeBack || !state.sessionId) return 0
-    const ids = [state.sessionId, ...(state.sessionIds ?? [])].filter(Boolean)
     let written = 0
-    for (const sessionId of ids) {
-      const fromSeq = state.dshSeq ?? 0
-      const events = await readDshMessages(sessionId, fromSeq)
-      if (!events.length) continue
-      let content = ''
-      for (const event of events) {
-        const message = event.data?.message ?? event.data
-        const blocks = Array.isArray(message?.content) ? message.content : []
-        const text = blocks.map(block => block?.type === 'text' ? block.text : '').filter(Boolean).join('\n')
+    let content = ''
+    for (const sessionId of binding.dshSessionIds) {
+      const fromSeq = state.dshSeqs[sessionId] ?? 0
+      const messages = await readDshSessionMessages({ persistence, sessions: sessionStore, sessionId, fromSeq })
+      for (const message of messages) {
+        const text = String(message.text ?? '')
         if (!text) continue
-        const role = message.role === 'assistant' ? 'assistant' : 'user'
-        const syncId = `dsh:${sessionId}:${event.seq}`
-        content += renderExternalLine(source.kind, { role, text, ts: event.time }, syncId)
+        content += renderExternalLine(
+          binding.kind,
+          { role: message.role, text, ts: message.time },
+          `dsh:${sessionId}:${message.seq}`,
+        )
       }
-      if (!content) continue
-      const backup = path.join(BACKUP_ROOT, `${safeId(source.id)}`, `${Date.now()}-${path.basename(source.path)}`)
-      await transport.copyToBackup(source.path, backup)
-      await transport.append(source.path, content)
-      state.dshSeq = Math.max(state.dshSeq ?? 0, ...events.map(event => event.seq))
-      written += events.length
+      if (messages.length) state.dshSeqs[sessionId] = Math.max(fromSeq, ...messages.map(message => message.seq))
+      written += messages.length
     }
+    if (!content) return 0
+    const statBefore = await transport.stat(binding.externalPath)
+    if (!statBefore) await transport.mkdir(dirOf(machine, binding.externalPath))
+    await transport.write(binding.externalPath, (statBefore ? await transport.read(binding.externalPath) : Buffer.alloc(0)).toString('utf8') + content)
+    const stat = await transport.stat(binding.externalPath)
+    state.externalSize = stat?.size
+    state.externalMtimeMs = stat?.mtimeMs
     return written
   }
 
-  const syncSource = async (source, forced = false) => {
-    const state = getState(source.id)
+  const syncBinding = async (binding, forced = false, directionOverride) => {
+    const state = getState(binding.id)
+    const machine = machineById(binding.machineId)
+    const direction = directionOverride ?? binding.direction
+    const context = {
+      phase: 'sync',
+      path: binding.externalPath,
+      machine: machine ?? { id: binding.machineId, label: binding.machineId, kind: 'local' },
+      transportKind: machine?.kind === 'ssh' ? 'ssh' : 'local',
+    }
+    let transport
+    let rollback
+    let snapshot
     try {
-      const transport = await createTransport(source, ctx.credentials, logger)
-      try {
-        let count = 0
-        if (source.kind === 'deepseekExport') {
-          count = await syncDeepSeekExport(source, state, transport)
-        } else {
-          count = await syncJsonlSource(source, state, transport)
-        }
-        const written = dirty.has(source.id) || forced ? await writeBack(source, state, transport) : 0
-        state.lastSyncAt = Date.now()
-        state.lastError = undefined
-        await saveState(state)
-        dirty.delete(source.id)
-        refreshReverse()
-        return { id: source.id, imported: count, written }
-      } finally {
-        transport.close?.()
-      }
-    } catch (error) {
-      state.lastError = String(error?.message ?? error)
+      transport = await transportFor(machine, binding.keyRef)
+      rollback = new SyncRollback({ logger })
+      snapshot = await rollback.begin({
+        bindingId: binding.id,
+        direction,
+        externalPath: binding.externalPath,
+        backupRoot: BACKUP_ROOT,
+        externalTransport: transport,
+        dshSessionId: binding.dshSessionIds[0],
+        dshFacade,
+      })
+
+      let imported = 0
+      let written = 0
+      if (direction === 'in' || direction === 'both') imported = await syncIn(binding, state, transport)
+      if (direction === 'out' || direction === 'both') written = await syncOut(binding, state, transport, machine ?? { kind: 'local' })
+
+      await rollback.succeed(snapshot)
+      state.lastSyncAt = Date.now()
+      state.lastError = undefined
+      state.lastFailure = undefined
       await saveState(state)
-      logger.warn?.(`[conversation-sync] ${source.name}: ${state.lastError}`)
-      return { id: source.id, error: state.lastError }
+      dirty.delete(binding.id)
+      return { id: binding.id, imported, written, direction }
+    } catch (error) {
+      const outcome = rollback
+        ? await rollback.fail(snapshot, error, context, { externalTransport: transport })
+        : { failure: diagnoseFailure(error, context), report: undefined }
+      const failure = {
+        ...outcome.failure,
+        backupPaths: snapshot?.external?.backupPath ? [snapshot.external.backupPath] : [],
+        restored: outcome.report?.restored,
+        cleanup: outcome.report?.errors ?? [],
+      }
+      state.lastError = failure.reason
+      state.lastFailure = failure
+      await saveState(state)
+      logger.warn?.(`[conversation-sync] ${binding.name}: ${failure.reason}`)
+      return { id: binding.id, error: failure.reason, failure, direction }
+    } finally {
+      transport?.close?.()
     }
   }
 
   const syncAll = async (forced = false) => {
     const results = []
-    for (const source of sourcesTable.entries()) {
-      if (forced || (source[1].enabled && source[1].autoSync)) {
-        results.push(await syncSource(source[1], forced))
-        // Yield to the event loop between sources so remote SSH polling of
-        // many sources cannot starve the UI/agent loop (pattern from
-        // dsh-plugin-codex-import).
+    for (const binding of allBindings()) {
+      if (forced || (binding.enabled && binding.autoSync)) {
+        results.push(await syncBinding(binding, forced))
+        // Yield between bindings so SSH polling cannot starve the UI/agent loop.
         await new Promise(resolve => setImmediate(resolve))
       }
     }
     return results
   }
 
+  // -------------------------------------------------------------- discovery
+
+  const scanExternal = async force => {
+    if (scanning) return externalCache
+    if (!force && Date.now() - externalCache.at < SCAN_TTL_MS) return externalCache
+    scanning = true
+    try {
+      const byMachine = {}
+      const errors = {}
+      for (const machine of machinesCache.machines) {
+        let transport
+        try {
+          transport = await transportFor(machine)
+          const result = await scanMachine(machine, { transport })
+          byMachine[machine.id] = result.sessions
+          if (result.errors.length) errors[machine.id] = result.errors
+        } catch (error) {
+          byMachine[machine.id] = []
+          errors[machine.id] = [String(error?.message ?? error)]
+          if (error?.message?.includes('credential')) {
+            errors[machine.id].push(`save the private-key PATH for this machine (credential ${keyRefFor(machine)})`)
+          }
+        } finally {
+          transport?.close?.()
+        }
+      }
+      externalCache = { at: Date.now(), byMachine, errors, dsh: await listDshSessions({ persistence, sessions: sessionStore, logger }) }
+      return externalCache
+    } finally {
+      scanning = false
+    }
+  }
+
+  const keyPaths = async () => {
+    const result = {}
+    for (const machine of machinesCache.machines) {
+      if (machine.kind !== 'ssh') continue
+      try {
+        const resolved = await ctx.credentials.resolve(keyRefFor(machine))
+        result[machine.id] = resolved?.value ?? ''
+      } catch {
+        result[machine.id] = ''
+      }
+    }
+    return result
+  }
+
   // ---------------------------------------------------------------- startup
 
   await ctx.effect(async () => {
     storage = await ctx.storageDomain.open(domain)
-    sourcesTable = storage.table('sources')
+    bindingsTable = storage.table('bindings')
     statesTable = storage.table('states')
-    refreshReverse()
+    await refreshMachines()
+    void scanExternal(true)
     return () => storage?.close?.()
   }, 'conversation-sync/storage')
 
   await ctx.effect(() => {
     const tick = async () => {
-      if (syncing) return
+      if (syncing || !bindingsTable) return
       syncing = true
-      try { await syncAll() } catch (error) { logger.warn?.(`[conversation-sync] tick: ${error.message}`) }
-      finally { syncing = false }
+      try {
+        for (const binding of allBindings()) {
+          if (!binding.enabled || !binding.autoSync) continue
+          const now = Date.now()
+          const due = now - (lastPoll.get(binding.id) ?? 0) >= (binding.pollMs ?? 2000)
+          if (!dirty.has(binding.id) && !due) continue
+          lastPoll.set(binding.id, now)
+          await syncBinding(binding)
+          await new Promise(resolve => setImmediate(resolve))
+        }
+      } catch (error) {
+        logger.warn?.(`[conversation-sync] poll: ${error?.message ?? error}`)
+      } finally {
+        syncing = false
+      }
     }
-    const timer = ctx.interval(() => { void tick() }, 2000)
-    // Immediate first pass unless the caller wants to wait.
+    const timer = ctx.interval(() => { void tick() }, POLL_INTERVAL_MS)
     void tick()
     return () => timer?.()
   }, 'conversation-sync/poll')
 
+  await ctx.effect(() => {
+    const timer = ctx.interval(() => { void scanExternal(false) }, SCAN_INTERVAL_MS)
+    return () => timer?.()
+  }, 'conversation-sync/scan-timer')
+
   ctx.on('session/event', (session, event) => {
-    const sourceId = reverse.get(session?.id)
-    if (sourceId && MESSAGE_TYPES.has(event?.type)) dirty.add(sourceId)
+    if (!MESSAGE_TYPES.has(event?.type)) return
+    for (const binding of bindingsTable ? allBindings() : []) {
+      if (binding.dshSessionIds.includes(session?.id)) dirty.add(binding.id)
+    }
   })
 
   // ------------------------------------------------------------- HTTP routes
 
   const rpc = async request => {
-    const body = await request.json()
+    const body = await request.json().catch(() => ({}))
     const action = body?.action
-    if (!sourcesTable) return Response.json({ error: 'not ready' }, { status: 503 })
+    if (!bindingsTable && action !== 'status') return Response.json({ error: 'not ready' }, { status: 503 })
+
     switch (action) {
-      case 'list':
-        return Response.json({
-          sources: [...sourcesTable.entries()].map(([, source]) => source),
-          states: [...statesTable.entries()].map(([, state]) => state),
-        })
-      case 'save': {
-        const parsed = sourceSchema.parse(body.source)
-        await sourcesTable.put(parsed.id, parsed)
-        const state = getState(parsed.id)
-        if (!state.workspaceId) {
-          await ensureWorkspace(parsed, state)
-        }
-        await saveState(state)
-        refreshReverse()
-        void syncSource(parsed, true)
-        return Response.json({ ok: true, source: parsed })
+      case 'status':
+        return Response.json({ ready: !!bindingsTable, syncing, scanning, bindings: bindingsTable ? allBindings().length : 0 })
+
+      case 'machines':
+        return Response.json({ machines: machinesCache.machines, warnings: machinesCache.warnings, keys: await keyPaths() })
+
+      case 'sessions': {
+        const cache = await scanExternal(!!body.force)
+        return Response.json({ dsh: cache.dsh, external: cache.byMachine, errors: cache.errors, warnings: machinesCache.warnings, at: cache.at })
       }
-      case 'remove': {
+
+      case 'bindings':
+        return Response.json({ bindings: allBindings(), states: [...statesTable.entries()].map(([, value]) => value) })
+
+      case 'setKey': {
+        const machineId = String(body.machineId ?? '')
+        const machine = machineById(machineId)
+        if (!machine || machine.kind !== 'ssh') return Response.json({ error: 'unknown SSH machine' }, { status: 404 })
+        const value = String(body.path ?? '')
+        if (!value) return Response.json({ error: 'private-key path is required' }, { status: 400 })
+        await ctx.credentials.set(keyRefFor(machine), value)
+        externalCache.at = 0
+        return Response.json({ ok: true, ref: keyRefFor(machine) })
+      }
+
+      case 'pair': {
+        const raw = body.binding ?? {}
+        const binding = bindingSchema.parse({
+          ...raw,
+          id: raw.id || `bnd-${randomUUID()}`,
+          name: raw.name || raw.externalPath || 'Untitled binding',
+        })
+        if (!binding.externalPath) return Response.json({ error: 'an external path is required' }, { status: 400 })
+        if (!binding.dshSessionIds.length && binding.direction === 'out') {
+          return Response.json({ error: 'select a DSH session on the left to export' }, { status: 400 })
+        }
+        await bindingsTable.put(binding.id, binding)
+        const state = getState(binding.id)
+        await saveState(state)
+        const result = await syncBinding(binding, true)
+        return Response.json({ binding: getBinding(binding.id), result })
+      }
+
+      case 'unbind': {
         const id = String(body.id ?? '')
-        await sourcesTable.delete(id)
+        await bindingsTable.delete(id)
         await statesTable.delete(id)
-        refreshReverse()
+        dirty.delete(id)
         return Response.json({ ok: true })
       }
+
       case 'sync': {
         if (body.id) {
-          const source = getSource(String(body.id))
-          if (!source) return Response.json({ error: 'source not found' }, { status: 404 })
-          return Response.json({ results: [await syncSource(source, true)] })
+          const binding = getBinding(String(body.id))
+          if (!binding) return Response.json({ error: 'binding not found' }, { status: 404 })
+          return Response.json({ results: [await syncBinding(binding, true, body.direction)] })
         }
         return Response.json({ results: await syncAll(true) })
       }
-      case 'status':
-        return Response.json({ ready: true, dirty: [...dirty], syncing })
+
       default:
         return Response.json({ error: `unknown action: ${action}` }, { status: 400 })
     }
