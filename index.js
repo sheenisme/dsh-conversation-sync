@@ -2,22 +2,30 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import Schema from '@deepseek-ai/schemastery'
 import { LocalTransport, transportForMachine } from './lib/transports.js'
 import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
 import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
+import { createHostKeyGuard } from './lib/hostkey.js'
 import { scanMachine } from './lib/discovery.js'
 import { listDshSessions, readDshSessionMessages } from './lib/dsh-sessions.js'
 import { SyncRollback, diagnoseFailure } from './lib/rollback.js'
 
 export const name = 'dsh-conversation-sync'
-export const inject = ['connection', 'credentials', 'sessionPersistence', 'sessionProjectionCache', 'workspaceRegistry', 'sessions', 'storageDomain']
+export const inject = ['timer', 'connection', 'credentials', 'sessionPersistence', 'sessionProjectionCache', 'workspaceRegistry', 'sessions', 'storageDomain']
 
 const NS = 'conversation-sync'
-const ROOT = path.join(os.homedir(), '.dsh', 'conversation-sync')
+// Honour DSH_HOME so an isolated home (CI, a sandbox, a second profile) keeps
+// plugin data inside itself instead of writing to the real ~/.dsh.
+const DSH_HOME = process.env.DSH_HOME && process.env.DSH_HOME.trim() ? process.env.DSH_HOME.trim() : path.join(os.homedir(), '.dsh')
+const ROOT = path.join(DSH_HOME, 'conversation-sync')
 const WORKSPACE_ROOT = path.join(ROOT, 'workspaces')
 const BACKUP_ROOT = path.join(ROOT, 'backups')
-const KINDS = ['claude', 'codex', 'jsonl', 'deepseekExport']
+const KINDS = ['claude', 'codex', 'workbuddy', 'trae', 'antigravity', 'opencode', 'jsonl', 'deepseekExport']
+// OpenCode lives in SQLite; writing into a live database from a plugin is not
+// safe, so it is import-only for now.
+const IMPORT_ONLY_KINDS = new Set(['deepseekExport', 'opencode'])
 const DIRECTIONS = ['in', 'out', 'both']
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 const SCAN_TTL_MS = 15_000
@@ -29,6 +37,8 @@ const bindingSchema = z.object({
   name: z.string(),
   machineId: z.string(),
   externalPath: z.string(),
+  externalSessionId: z.string().optional(),
+  dbPath: z.string().optional(),
   kind: z.enum(KINDS),
   dshSessionIds: z.array(z.string()).default([]),
   direction: z.enum(DIRECTIONS).default('both'),
@@ -75,11 +85,23 @@ function safeId(value) {
   return String(value).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'unknown'
 }
 
+/** Plugin config: DSH merges these from the profile patch / config editor. */
+export const Config = Schema.object({
+  hostKeyMode: Schema.union(['accept-new', 'verify', 'off'])
+    .default('accept-new')
+    .description('SSH host-key policy: accept-new records a fingerprint on first connect, verify rejects unknown hosts, off disables checking.'),
+  pollIntervalMs: Schema.natural().min(1000).max(600000).default(2000)
+    .description('How often enabled bindings poll their source files for changes.'),
+  autoSync: Schema.boolean().default(true)
+    .description('Sync bindings that opt into autoSync whenever a change is detected.'),
+})
+
 function dirOf(machine, filePath) {
   return machine?.kind === 'ssh' ? path.posix.dirname(filePath) : path.dirname(filePath)
 }
 
-export async function apply(ctx) {
+export async function apply(ctx, config = {}) {
+  const settings = { hostKeyMode: 'accept-new', pollIntervalMs: 2000, autoSync: true, ...config }
   const logger = ctx.logger ?? console
   const sessionStore = ctx.sessions
   const persistence = ctx.sessionPersistence
@@ -97,6 +119,11 @@ export async function apply(ctx) {
   const dirty = new Set()
   const lastPoll = new Map()
   const localTransport = new LocalTransport()
+  const hostKeyGuard = createHostKeyGuard({
+    file: path.join(ROOT, 'known_hosts.json'),
+    mode: settings.hostKeyMode,
+    logger,
+  })
 
   const getState = id => statesTable.get(id) ?? { bindingId: id, dshSeqs: {}, importedIds: [] }
   const saveState = state => statesTable.put(state.bindingId, state)
@@ -121,7 +148,9 @@ export async function apply(ctx) {
 
   const transportFor = async (machine, keyRef) => {
     if (!machine) throw new Error('unknown machine; refresh the machine list and retry')
-    return transportForMachine(machine, machinesCache.machines, ctx.credentials, logger, keyRef)
+    return transportForMachine(machine, machinesCache.machines, ctx.credentials, logger, keyRef, {
+      hostKeyGuard,
+    })
   }
 
   // ---------------------------------------------------------- session helpers
@@ -234,6 +263,27 @@ export async function apply(ctx) {
       return imported
     }
 
+    if (binding.kind === 'opencode') {
+      const { readOpenCodeMessages } = await import('./lib/opencode.js')
+      const sessionId = binding.externalSessionId ?? binding.externalPath
+      const delta = await readOpenCodeMessages({ file: binding.dbPath ?? binding.externalPath, sessionId, fromSeq: state.cursor?.offset ?? 0 })
+      if (!delta.records.length) {
+        if (!binding.dshSessionIds.length) throw new Error(`OpenCode session ${sessionId} has no importable messages`)
+        return 0
+      }
+      if (!binding.dshSessionIds.length) {
+        const created = await createSession(binding, state, delta.records, binding.name)
+        binding.dshSessionIds.push(created.id)
+        state.dshSeqs[created.id] = created.lastSeq
+        await bindingsTable.put(binding.id, binding)
+      } else {
+        const id = binding.dshSessionIds[0]
+        state.dshSeqs[id] = await appendSession(id, delta.records, state.dshSeqs[id] ?? 0)
+      }
+      state.cursor = { offset: delta.cursor, pending: '' }
+      return delta.records.length
+    }
+
     const delta = await readJsonlDelta(transport, binding.externalPath, binding.kind, state.cursor)
     if (delta.absent) throw new Error(`source file not found: ${binding.externalPath}`)
     if (!binding.dshSessionIds.length) {
@@ -255,6 +305,9 @@ export async function apply(ctx) {
   const syncOut = async (binding, state, transport, machine) => {
     if (binding.kind === 'deepseekExport') {
       throw new Error('DeepSeek export ZIP is read-only: choose direction "in" (import) for this source')
+    }
+    if (binding.kind === 'opencode') {
+      throw new Error('OpenCode stores sessions in SQLite; importing only. Choose direction "in" for this source')
     }
     let written = 0
     let content = ''
@@ -431,7 +484,7 @@ export async function apply(ctx) {
         syncing = false
       }
     }
-    const timer = ctx.interval(() => { void tick() }, POLL_INTERVAL_MS)
+    const timer = ctx.interval(() => { void tick() }, settings.pollIntervalMs)
     void tick()
     return () => timer?.()
   }, 'conversation-sync/poll')

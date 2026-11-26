@@ -1,0 +1,4 @@
+{"type":"user","uuid":"u1","sessionId":"c0000000-0000-4000-8000-000000000001","timestamp":"2026-01-02T03:04:05.000Z","message":{"role":"user","content":"List the files in the current directory."}}
+{"type":"assistant","uuid":"a1","sessionId":"c0000000-0000-4000-8000-000000000001","timestamp":"2026-01-02T03:04:07.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I will run ls."},{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","uuid":"u2","sessionId":"c0000000-0000-4000-8000-000000000001","timestamp":"2026-01-02T03:04:08.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"README.md\nindex.js"}]}}
+{"type":"assistant","uuid":"a2","sessionId":"c0000000-0000-4000-8000-000000000001","timestamp":"2026-01-02T03:04:09.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The directory holds README.md and index.js."}]}}

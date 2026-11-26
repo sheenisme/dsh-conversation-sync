@@ -22,12 +22,10 @@
   "engines": {
     "node": ">=22.13"
   },
-  "peerDependencies": {
-    "cordis": "^4.0.1",
-    "dsh": ">=0.1.5-rc.1",
-    "@deepseek-ai/dsh-client-locale": ">=0.1.0-rc.6"
-  },
   "main": "./index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -46,6 +44,27 @@
     "README.zh-CN.md",
     "docs/DETAIL.md"
   ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "fflate": "^0.8.2",
+    "zod": "^3.25.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-locale": "*",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "*",
+    "ssh2": ">=1.15.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-plugin-manager": {
+      "optional": true
+    },
+    "ssh2": {
+      "optional": true
+    }
+  },
   "icon": "./icon.svg",
   "dsh": {
     "bundle": {

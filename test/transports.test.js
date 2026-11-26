@@ -1,0 +1,96 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { planJumpChain, LocalTransport, transportForMachine } from '../lib/transports.js'
+
+const hop = (name, port = 22) => ({ host: name, port, username: name, privateKeyPath: `/keys/${name}` })
+
+test('planJumpChain: single hop forwards to the target', () => {
+  const plan = planJumpChain([hop('bastion', 2222)], { host: 'prod', port: 22 })
+  assert.equal(plan.length, 1)
+  assert.equal(plan[0].hop.host, 'bastion')
+  assert.equal(plan[0].nextHost, 'prod')
+  assert.equal(plan[0].nextPort, 22)
+})
+
+test('planJumpChain: two hops chain hop1 -> hop2 -> target', () => {
+  const plan = planJumpChain([hop('outer', 2200), hop('inner', 2201)], { host: 'db', port: 5432 })
+  assert.deepEqual(plan.map(step => step.nextHost), ['inner', 'db'])
+  assert.deepEqual(plan.map(step => step.nextPort), [2201, 5432])
+})
+
+test('planJumpChain: empty or missing chain is a plain connection', () => {
+  assert.deepEqual(planJumpChain([], { host: 'x' }), [])
+  assert.deepEqual(planJumpChain(undefined, { host: 'x' }), [])
+})
+
+test('planJumpChain: a runaway chain is capped, not followed forever', () => {
+  const many = Array.from({ length: 40 }, (_, index) => hop(`h${index}`))
+  assert.equal(planJumpChain(many, { host: 'target' }).length, 8)
+})
+
+test('planJumpChain: hostname fallback for config-style hosts', () => {
+  const plan = planJumpChain([{ host: 'alias' }], { hostname: 'real.example.com', port: 22 })
+  assert.equal(plan[0].nextHost, 'real.example.com')
+})
+
+test('LocalTransport: the basic facade behaves like a filesystem', async () => {
+  const os = await import('node:os')
+  const fs = await import('node:fs/promises')
+  const path = await import('node:path')
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cs-tr-'))
+  const transport = new LocalTransport()
+  try {
+    const file = path.join(dir, 'nested', 'a.jsonl')
+    await transport.write(file, 'line1\n')
+    assert.deepEqual(await transport.stat(file), { size: 6, mtimeMs: (await fs.stat(file)).mtimeMs })
+    await transport.append(file, 'line2\n')
+    assert.equal((await transport.stat(file)).size, 12)
+    assert.equal((await transport.read(file, 6)).toString(), 'line2\n')
+    assert.equal(await transport.home(), os.homedir())
+    assert.equal(await transport.stat(path.join(dir, 'nope')), undefined)
+    // reading past the end is empty, not an error
+    assert.equal((await transport.read(file, 999)).length, 0)
+    // list reports directories as such
+    const entries = await transport.list(path.join(dir, 'nested'))
+    assert.equal(entries[0].name, 'a.jsonl')
+    assert.equal(entries[0].isDirectory, false)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('transportForMachine: local machine never needs a credential', async () => {
+  const credentials = { resolve: async () => { throw new Error('should not be called') } }
+  const transport = await transportForMachine({ id: 'local', kind: 'local' }, [], credentials)
+  assert.equal(transport.kind, 'local')
+})
+
+test('transportForMachine: a missing SSH key fails with the credential ref name', async () => {
+  const credentials = { resolve: async () => undefined }
+  await assert.rejects(
+    transportForMachine({ id: 'ssh:box', kind: 'ssh', host: 'box', user: 'u' }, [{ id: 'ssh:box', kind: 'ssh', host: 'box' }], credentials),
+    /conversation-sync\/ssh-key\/ssh:box/,
+  )
+})
+
+test('transportForMachine: each hop resolves its own key and the chain order is kept', async () => {
+  const asked = []
+  const credentials = {
+    resolve: async ref => {
+      asked.push(ref)
+      return { value: `/keys/${ref.split('/').pop()}` }
+    },
+  }
+  const machines = [
+    { id: 'ssh:outer', kind: 'ssh', hostname: 'outer.example', user: 'o', port: 2200 },
+    { id: 'ssh:inner', kind: 'ssh', host: 'inner.example', user: 'i' },
+    { id: 'ssh:target', kind: 'ssh', host: 'target.example', user: 't', via: ['ssh:outer', 'ssh:inner'] },
+  ]
+  const transport = await transportForMachine(machines[2], machines, credentials)
+  assert.equal(transport.via.length, 2)
+  assert.deepEqual(transport.via.map(step => step.host), ['outer.example', 'inner.example'])
+  assert.deepEqual(transport.via.map(step => step.privateKeyPath), ['/keys/ssh:outer', '/keys/ssh:inner'])
+  assert.equal(transport.privateKeyPath, '/keys/ssh:target')
+  // the target's key is never reused for a hop
+  assert.equal(new Set(asked).size, 3)
+})

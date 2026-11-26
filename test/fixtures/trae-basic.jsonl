@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-02T03:04:05.000Z","type":"event_msg","payload":{"type":"user_message","message":"Refactor the parser."}}
+{"timestamp":"2026-01-02T03:04:06.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Refactor the parser."}]}}
+{"timestamp":"2026-01-02T03:04:07.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I split the tokenizer out."}]}}
+{"timestamp":"2026-01-02T03:04:08.000Z","type":"history_mutation","payload":{"operation":"replace"}}

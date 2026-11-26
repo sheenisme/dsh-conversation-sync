@@ -87,11 +87,16 @@ window.__ModuleLoader__.load({
         if (direction !== 'in' && !left) { setError(t('panel.pickLeft')); return }
         setBusy(true)
         try {
+          // OpenCode sessions live inside one SQLite file: the file is the
+          // external path and the row id is the session selector.
+          const opencode = right.kind === 'opencode'
           const result = await rpc('pair', {
             binding: {
               name: titleOf(right),
               machineId: machineFilter,
-              externalPath: right.path,
+              externalPath: opencode ? (right.dbPath ?? right.path) : right.path,
+              externalSessionId: opencode ? right.id : undefined,
+              dbPath: opencode ? (right.dbPath ?? right.path) : undefined,
               kind: right.kind,
               dshSessionIds: left ? [left] : [],
               direction,
@@ -238,7 +243,7 @@ window.__ModuleLoader__.load({
               jsxs('div', { style: s.row, children: [
                 jsx('strong', { children: binding.name }),
                 jsx('span', { style: s.tag, children: binding.direction }),
-                jsx('span', { style: s.small, children: `${binding.machineId} · ${binding.externalPath}` }),
+                jsx('span', { style: s.small, children: `${binding.machineId} · ${binding.externalPath}${binding.externalSessionId ? `#${binding.externalSessionId}` : ''}` }),
               ] }),
               binding.dshSessionIds.length ? jsx('div', { style: s.small, children: `DSH: ${binding.dshSessionIds.map(shortId).join(', ')}` }) : jsx('div', { style: s.small, children: t('panel.externalOnly') }),
               state?.lastSyncAt ? jsx('div', { style: s.small, children: `${t('panel.lastSync')} ${new Date(state.lastSyncAt).toLocaleString()}` }) : null,
@@ -277,7 +282,7 @@ window.__ModuleLoader__.load({
       'panel.lastSync': 'Last sync:', 'panel.failure': 'Sync failed:', 'panel.pickLeft': 'Select a DSH session on the left first.',
       'panel.pickRight': 'Select an external session on the right first.',
       'panel.removeSource': 'Remove binding', 'panel.confirmRemove': 'Remove this sync binding?', 'panel.cancel': 'Cancel', 'panel.save': 'Save',
-      'panel.kinds.claude': 'Claude Code', 'panel.kinds.codex': 'Codex CLI', 'panel.kinds.jsonl': 'Generic JSONL', 'panel.kinds.deepseekExport': 'DeepSeek export ZIP',
+      'panel.kinds.claude': 'Claude Code', 'panel.kinds.codex': 'Codex CLI', 'panel.kinds.workbuddy': 'WorkBuddy / CodeBuddy', 'panel.kinds.trae': 'TRAE', 'panel.kinds.antigravity': 'Antigravity', 'panel.kinds.opencode': 'OpenCode', 'panel.kinds.jsonl': 'Generic JSONL', 'panel.kinds.deepseekExport': 'DeepSeek export ZIP',
       'panel.warnings.writeBack': 'Warning: write-back edits the original tool\'s live files. A backup is taken before every write and restored on failure, but data loss is still possible.',
     }
     const zh = {
@@ -296,7 +301,7 @@ window.__ModuleLoader__.load({
       'panel.lastSync': '上次同步：', 'panel.failure': '同步失败：', 'panel.pickLeft': '请先在左侧选择一个 DSH 会话。',
       'panel.pickRight': '请先在右侧选择一个外部会话。',
       'panel.removeSource': '删除绑定', 'panel.confirmRemove': '确定删除这个同步绑定？', 'panel.cancel': '取消', 'panel.save': '保存',
-      'panel.kinds.claude': 'Claude Code', 'panel.kinds.codex': 'Codex CLI', 'panel.kinds.jsonl': '通用 JSONL', 'panel.kinds.deepseekExport': 'DeepSeek 导出 ZIP',
+      'panel.kinds.claude': 'Claude Code', 'panel.kinds.codex': 'Codex CLI', 'panel.kinds.workbuddy': 'WorkBuddy / CodeBuddy', 'panel.kinds.trae': 'TRAE', 'panel.kinds.antigravity': 'Antigravity', 'panel.kinds.opencode': 'OpenCode', 'panel.kinds.jsonl': '通用 JSONL', 'panel.kinds.deepseekExport': 'DeepSeek 导出 ZIP',
       'panel.warnings.writeBack': '警告：写回会直接修改原工具的活跃文件。每次写入前都会备份，失败时自动回滚，但仍可能发生数据丢失。',
     }
 

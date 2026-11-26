@@ -1,0 +1,5 @@
+{"timestamp":"2026-01-02T03:04:05.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Show the git status."}]}}
+{"timestamp":"2026-01-02T03:04:07.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Need to inspect the working tree."}]}}
+{"timestamp":"2026-01-02T03:04:08.000Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call_1","arguments":"{\"command\":[\"git\",\"status\"]}"}}
+{"timestamp":"2026-01-02T03:04:09.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_1","output":"On branch main\nnothing to commit"}}
+{"timestamp":"2026-01-02T03:04:10.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The tree is clean on main."}]}}

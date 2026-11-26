@@ -40,7 +40,11 @@
       "claude": "Claude Code",
       "codex": "Codex CLI",
       "jsonl": "通用 JSONL",
-      "deepseekExport": "DeepSeek 导出 ZIP"
+      "deepseekExport": "DeepSeek 导出 ZIP",
+      "workbuddy": "WorkBuddy / CodeBuddy",
+      "trae": "TRAE",
+      "antigravity": "Antigravity",
+      "opencode": "OpenCode"
     },
     "warnings": {
       "writeBack": "警告：写回会直接修改原工具的活跃文件。每次写入前都会备份，失败时自动回滚，但仍可能发生数据丢失。"
