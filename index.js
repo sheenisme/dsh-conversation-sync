@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import Schema from '@deepseek-ai/schemastery'
 import { LocalTransport, transportForMachine } from './lib/transports.js'
+import { createTransportPool } from './lib/pool.js'
 import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
 import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
@@ -152,6 +153,16 @@ export async function apply(ctx, config = {}) {
       hostKeyGuard,
     })
   }
+
+  // One live transport per machine, reused across scans, polls and syncs, so a
+  // 30s discovery tick does not pay for a fresh SSH handshake every time.
+  const transportPool = createTransportPool({
+    create: (machine, keyRef) => transportFor(machine, keyRef),
+    logger,
+  })
+  const pooledTransport = (machine, keyRef) => transportPool.get(machine, keyRef)
+  const withPooledTransport = (machine, keyRef, fn) => transportPool.run(machine, keyRef, fn)
+  const discardTransport = machine => transportPool.discard(machine)
 
   // ---------------------------------------------------------- session helpers
 
@@ -359,7 +370,9 @@ export async function apply(ctx, config = {}) {
     let rollback
     let snapshot
     try {
-      transport = await transportFor(machine, binding.keyRef)
+      // Pooled: syncing the same machine again (the common case, every poll)
+      // must not pay for another SSH handshake.
+      transport = await pooledTransport(machine, binding.keyRef)
       rollback = new SyncRollback({ logger })
       snapshot = await rollback.begin({
         bindingId: binding.id,
@@ -397,9 +410,12 @@ export async function apply(ctx, config = {}) {
       state.lastFailure = failure
       await saveState(state)
       logger.warn?.(`[conversation-sync] ${binding.name}: ${failure.reason}`)
+      // A failed sync often means the connection itself is gone; drop it so the
+      // next attempt reconnects instead of retrying a dead socket forever.
+      if (machine?.kind === 'ssh' && !failure?.reason?.match(/not found|does not exist|permission/i)) {
+        discardTransport(machine)
+      }
       return { id: binding.id, error: failure.reason, failure, direction }
-    } finally {
-      transport?.close?.()
     }
   }
 
@@ -425,10 +441,10 @@ export async function apply(ctx, config = {}) {
       const byMachine = {}
       const errors = {}
       for (const machine of machinesCache.machines) {
-        let transport
         try {
-          transport = await transportFor(machine)
-          const result = await scanMachine(machine, { transport })
+          // Kept open between ticks: a scan should not pay for a fresh SSH
+          // handshake every 30 seconds.
+          const result = await withPooledTransport(machine, undefined, transport => scanMachine(machine, { transport }))
           byMachine[machine.id] = result.sessions
           if (result.errors.length) errors[machine.id] = result.errors
         } catch (error) {
@@ -437,8 +453,6 @@ export async function apply(ctx, config = {}) {
           if (error?.message?.includes('credential')) {
             errors[machine.id].push(`save the private-key PATH for this machine (credential ${keyRefFor(machine)})`)
           }
-        } finally {
-          transport?.close?.()
         }
       }
       externalCache = { at: Date.now(), byMachine, errors, dsh: await listDshSessions({ persistence, sessions: sessionStore, logger }) }
@@ -470,7 +484,12 @@ export async function apply(ctx, config = {}) {
     statesTable = storage.table('states')
     await refreshMachines()
     void scanExternal(true)
-    return () => storage?.close?.()
+    return () => {
+      // Pooled SSH connections outlive the request that opened them, so they
+      // must be closed explicitly when the plugin is reloaded or removed.
+      discardTransport()
+      storage?.close?.()
+    }
   }, 'conversation-sync/storage')
 
   await ctx.effect(() => {

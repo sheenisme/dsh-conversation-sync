@@ -128,6 +128,13 @@ component's session log).
   version 1), tables `bindings` and `states`.
 - Machine list, discovered sessions and key-path references are held in memory
   and refreshed by the discovery tick; key paths are durable DSH credentials.
+- Connections are pooled per machine: discovery runs every 30 seconds and each
+  sync poll needs the same host, so without a pool every tick opened a fresh TCP
+  connection, key exchange and authentication for every hop. A pooled
+  connection is dropped only when the call fails at the link level (a dead SFTP
+  channel, a dropped socket); ordinary errors such as "that file is not there"
+  keep it open, because reconnecting would waste a handshake per tick. The pool
+  is closed when the plugin unloads, so a reload cannot leak sockets.
 - The SSH transport keeps one SFTP connection per machine (chained through jump
   hosts when needed) and reconnects on failure.
 - Directory creation walks the path one component at a time rather than using
@@ -142,7 +149,7 @@ component's session log).
 
 ## Testing
 
-`npm test` runs 85 unit tests (`node:test`, no network). Each tool format has a
+`npm test` runs 95 unit tests (`node:test`, no network). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
