@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import Schema from '@deepseek-ai/schemastery'
 import { LocalTransport, transportForMachine, previewKeyPath } from './lib/transports.js'
-import { createTransportPool } from './lib/pool.js'
+import { createTransportPool, mapLimit } from './lib/pool.js'
 import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
 import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
@@ -120,6 +120,7 @@ export async function apply(ctx, config = {}) {
   let machinesCache = { machines: [{ id: 'local', label: 'Local machine', kind: 'local' }], warnings: [] }
   let externalCache = { at: 0, byMachine: {}, errors: {}, dsh: [] }
   let scanning = false
+  let activeScan = null
   let syncing = false
 
   const dirty = new Set()
@@ -444,36 +445,57 @@ export async function apply(ctx, config = {}) {
 
   // -------------------------------------------------------------- discovery
 
+  const scanMachineInto = async machine => {
+    try {
+      // Kept open between ticks: a scan should not pay for a fresh SSH
+      // handshake every 30 seconds.
+      const result = await withPooledTransport(machine, undefined, transport => scanMachine(machine, { transport }))
+      return { machineId: machine.id, sessions: result.sessions, errors: result.errors }
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      const errors = [message]
+      if (/no SSH private key|cannot read the SSH private key|credential/i.test(message)) {
+        errors.push(
+          `save the private-key PATH for this machine (credential ${keyRefFor(machine)}), ` +
+          `or add 'IdentityFile' for it in ~/.ssh/config`,
+        )
+      }
+      return { machineId: machine.id, sessions: [], errors }
+    }
+  }
+
+  /**
+   * Scan every machine, a few at a time.
+   *
+   * One-at-a-time was a real problem: with twelve hosts, three of which are
+   * unreachable, a scan spent over a minute in connect timeouts before the
+   * panel learned anything about the reachable ones. Running four at once
+   * bounds that, and an unreachable host now costs 8 seconds rather than 15.
+   */
   const scanExternal = async force => {
-    if (scanning) return externalCache
+    // A scan already in flight is awaited rather than reported as "no sessions":
+    // returning the empty initial cache made the panel show every machine as
+    // empty until the scan happened to finish.
+    if (scanning) return activeScan ?? externalCache
     if (!force && Date.now() - externalCache.at < SCAN_TTL_MS) return externalCache
     scanning = true
-    try {
+    activeScan = (async () => {
       const byMachine = {}
       const errors = {}
-      for (const machine of machinesCache.machines) {
-        try {
-          // Kept open between ticks: a scan should not pay for a fresh SSH
-          // handshake every 30 seconds.
-          const result = await withPooledTransport(machine, undefined, transport => scanMachine(machine, { transport }))
-          byMachine[machine.id] = result.sessions
-          if (result.errors.length) errors[machine.id] = result.errors
-        } catch (error) {
-          byMachine[machine.id] = []
-          errors[machine.id] = [String(error?.message ?? error)]
-          const message = String(error?.message ?? error)
-          if (/no SSH private key|cannot read the SSH private key|credential/i.test(message)) {
-            errors[machine.id].push(
-              `save the private-key PATH for this machine (credential ${keyRefFor(machine)}), ` +
-              `or add 'IdentityFile' for it in ~/.ssh/config`,
-            )
-          }
-        }
+      const results = await mapLimit(machinesCache.machines, 4, scanMachineInto)
+      for (const result of results) {
+        if (!result) continue
+        byMachine[result.machineId] = result.sessions
+        if (result.errors.length) errors[result.machineId] = result.errors
       }
       externalCache = { at: Date.now(), byMachine, errors, dsh: await listDshSessions({ persistence, sessions: sessionStore, logger }) }
       return externalCache
+    })()
+    try {
+      return await activeScan
     } finally {
       scanning = false
+      activeScan = null
     }
   }
 

@@ -112,3 +112,49 @@ test('scanMachine(): a transport error code is not rewritten as a home problem',
   assert.match(errors[0], /Permission denied/)
   assert.ok(!/cannot resolve home/.test(errors[0]))
 })
+
+test('scanMachine(): a transport with inspect()/findFiles() is used, not a chunked read', async () => {
+  // This is the shape that makes a remote scan finish: one round trip for the
+  // tree and one per file, instead of one directory listing per level plus a
+  // 256 KB-at-a-time read of up to 8 MB for every file.
+  const calls = { findFiles: 0, inspect: 0, walk: 0, read: 0 }
+  const files = {
+    '/home/u/.claude/projects/p/one.jsonl': '{"sessionId":"s1","type":"user","message":{"role":"user","content":"hello"}}\n',
+  }
+  const transport = {
+    kind: 'ssh',
+    calls,
+    _store: files,
+    async home() { return '/home/u' },
+    async findFiles(dir, depth, suffix) {
+      calls.findFiles++
+      const prefix = `${dir}/`
+      if (!Object.keys(files).some(f => f.startsWith(prefix))) return undefined
+      return Object.keys(files).filter(f => f.startsWith(prefix) && f.endsWith(suffix))
+        .map(full => ({ path: full, name: full.split('/').pop(), isDirectory: false }))
+    },
+    async inspect(file) {
+      calls.inspect++
+      const body = files[file]
+      if (body === undefined) return undefined
+      return { size: body.length, mtimeMs: 1700000000000, count: body.split('\n').length - 1, head: Buffer.from(body) }
+    },
+    // Only the OpenCode database probe is allowed to stat(); a session file must
+    // not be, because inspect() already answered everything about it.
+    async stat(file) {
+      if (file.endsWith('opencode.db')) return undefined
+      throw new Error(`stat(${file}) should not be needed when inspect() exists`)
+    },
+    async read() { calls.read++; throw new Error('read() should not be needed when inspect() exists') },
+    async list() { calls.walk++; return [] },
+    async close() {},
+  }
+  const { sessions, errors } = await scanMachine({ id: 'ssh:u' }, { transport })
+  assert.deepEqual(errors, [])
+  assert.equal(sessions.length, 1)
+  assert.equal(sessions[0].count, 1)
+  assert.equal(sessions[0].kind, 'claude')
+  // One find per root (8 tool roots + 3 Antigravity bases), one inspect per file.
+  // The point of the assertion: no per-directory listing and no chunked read.
+  assert.deepEqual(calls, { findFiles: 11, inspect: 1, walk: 0, read: 0 })
+})

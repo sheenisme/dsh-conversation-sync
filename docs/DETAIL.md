@@ -164,6 +164,12 @@ component's session log).
   full connect attempts and produced four copies of the same error. Measured
   against a real `~/.ssh/config` with unreachable hosts, per-machine scan time fell
   from 70-112s to about 5s.
+- A scan asks each root for its whole tree in one `find`, and each file for its
+  size, line count and first bytes in one `wc`/`stat`/`head`. This matters over a
+  tunnel: the first version listed one directory per round trip and counted lines
+  by reading up to 8 MB in 256 KB chunks, which came to roughly 1900 round trips
+  for a host with 55 rollouts — the scan never finished. The same host now
+  completes in about 20 seconds.
 - Host keys are checked by `ssh` itself through the user's `known_hosts`, and
   additionally recorded in `known_hosts.json` in the plugin data directory for
   the `ssh2` fallback path. The default `hostKeyMode` is `accept-new`: a server seen
@@ -201,7 +207,7 @@ component's session log).
 
 ## Testing
 
-`npm test` runs 119 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 126 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`

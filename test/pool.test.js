@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createTransportPool } from '../lib/pool.js'
+import { createTransportPool, mapLimit } from '../lib/pool.js'
 
 const fakeMachine = (id, kind = 'ssh') => ({ id, kind, hostname: `${id}.example`, user: 'u' })
 
@@ -118,4 +118,39 @@ test('pool: a transport that closed itself is replaced, not reused', async () =>
 
 test('createTransportPool() requires a create() function', () => {
   assert.throws(() => createTransportPool({}), /requires a create\(\) function/)
+})
+
+test('mapLimit(): keeps the result order and never exceeds the limit', async () => {
+  let live = 0
+  let peak = 0
+  const out = await mapLimit([5, 1, 3, 2], 2, async n => {
+    live++
+    peak = Math.max(peak, live)
+    await new Promise(resolve => setTimeout(resolve, n * 5))
+    live--
+    return n * 2
+  })
+  assert.deepEqual(out, [10, 2, 6, 4])
+  assert.equal(peak, 2)
+})
+
+test('mapLimit(): an empty list resolves to an empty list', async () => {
+  assert.deepEqual(await mapLimit([], 4, async () => 1), [])
+})
+
+test('mapLimit(): a limit larger than the list does not start phantom workers', async () => {
+  const seen = []
+  const out = await mapLimit(['a', 'b'], 8, async item => {
+    seen.push(item)
+    return item.toUpperCase()
+  })
+  assert.deepEqual(out, ['A', 'B'])
+  assert.equal(seen.length, 2)
+})
+
+test('mapLimit(): rejects a limit that would silently skip the work', async () => {
+  // A zero limit starts no workers, so every result would stay undefined and the
+  // scan would report "no sessions" for machines it never looked at.
+  await assert.rejects(() => mapLimit([1], 0, async () => 1), /positive limit/)
+  await assert.rejects(() => mapLimit([1], Number.NaN, async () => 1), /positive limit/)
 })

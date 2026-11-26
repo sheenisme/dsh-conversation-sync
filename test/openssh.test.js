@@ -151,3 +151,42 @@ test('OpenSshTransport: an unreachable host fails once, not once per command', a
   assert.ok(Date.now() - started < 1000, 'the second and third calls must not reconnect')
   transport.close()
 })
+
+test('inspect(): size, mtime, line count and the head of the file in one call', async () => {
+  await withStubSsh(async ({ remote }) => {
+    const transport = new OpenSshTransport({ host: 'h' })
+    transport._home = remote
+    const file = path.join(remote, 'rollout.jsonl')
+    await fs.writeFile(file, '{"a":1}\n{"b":2}\n{"c":3}\n')
+    const info = await transport.inspect(file)
+    assert.equal(info.size, 24)
+    assert.equal(info.count, 3)
+    assert.ok(info.mtimeMs > 0)
+    assert.match(info.head.toString(), /"a":1/)
+    // The head must not be the whole file when the file is bigger than the cap.
+    const big = path.join(remote, 'big.jsonl')
+    await fs.writeFile(big, 'x'.repeat(50) + '\n')
+    const capped = await transport.inspect(big, 8)
+    assert.equal(capped.head.length, 8)
+    assert.equal(capped.count, 1)
+    assert.equal(await transport.inspect(path.join(remote, 'nope.jsonl')), undefined)
+  })
+})
+
+test('findFiles(): the whole tree in one round trip, depth-limited', async () => {
+  await withStubSsh(async ({ remote }) => {
+    const transport = new OpenSshTransport({ host: 'h' })
+    transport._home = remote
+    await fs.mkdir(path.join(remote, 'sessions', '2026', '11'), { recursive: true })
+    await fs.writeFile(path.join(remote, 'sessions', 'top.jsonl'), '{}\n')
+    await fs.writeFile(path.join(remote, 'sessions', '2026', '11', 'deep.jsonl'), '{}\n')
+    await fs.writeFile(path.join(remote, 'sessions', '2026', '11', 'note.txt'), 'x')
+    const found = await transport.findFiles(path.join(remote, 'sessions'), 3, '.jsonl')
+    const names = found.map(entry => entry.name).sort()
+    assert.deepEqual(names, ['deep.jsonl', 'top.jsonl'])
+    // A depth limit really limits, and an absent root is undefined rather than [].
+    const shallow = await transport.findFiles(path.join(remote, 'sessions'), 1, '.jsonl')
+    assert.deepEqual(shallow.map(entry => entry.name), ['top.jsonl'])
+    assert.equal(await transport.findFiles(path.join(remote, 'missing'), 3, '.jsonl'), undefined)
+  })
+})
