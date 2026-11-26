@@ -168,7 +168,7 @@ component's session log).
 
 ## Testing
 
-`npm test` runs 95 unit tests (`node:test`, no network). Each tool format has a
+`npm test` runs 96 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -183,10 +183,49 @@ that unit fixtures cannot:
 | `install-dsh.mjs` | installs one DSH version so it can actually run under plain Node — it reads `@deepseek-ai/dsh-app-boot`'s peer ranges from the registry, because npm does not install the peers of a transitive package |
 | `harness.mjs` | shared profile bootstrap, health-line wait, activation check and auth-cookie handshake |
 | `boot-check.mjs` | "does this DSH version support the plugin": install, boot, import, read back |
-| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `reimport` — the user journey over the real RPC surface |
+| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `reimport`, `direction` — the user journey over the real RPC surface |
 
-`.github/workflows/ci.yml` runs the unit suite on two Node versions, `boot-check`
-against the five most recent DSH releases, and the five scenarios against the two
-most recent ones. A version counts as supported only when `boot-check` exits 0,
-which requires both that no bundle failed to activate and that a conversation
-really landed in a DSH session.
+`.github/workflows/ci.yml` runs three jobs:
+
+| Job | What it proves |
+| --- | --- |
+| `unit` | the pure modules behave, on the oldest supported Node (24.9.0) and the latest 24.x |
+| `compatibility` | the plugin activates and imports a conversation on each of the **five most recent DSH releases** |
+| `functional` | the user journey on the two newest releases: import, export, all five tool formats, failure reporting, no duplicate re-import, and that an explicit sync direction is honoured |
+
+A version counts as supported only when `boot-check` exits 0, which requires both
+that no bundle failed to activate and that a conversation really landed in a DSH
+session. The version list is resolved at run time by
+`scripts/ci/recent-versions.mjs` rather than pinned in the workflow, so the
+matrix cannot silently rot; a release that is genuinely broken upstream is
+listed in that script's `BROKEN` map with a reason and surfaces as a CI warning
+instead of a red job.
+
+Running the harness locally against any installed DSH:
+
+```bash
+node scripts/ci/install-dsh.mjs --version 0.2.2-rc.5 --dir /tmp/dsh
+node scripts/ci/boot-check.mjs --dsh /tmp/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js \
+  --tarball "$(npm pack --silent)" --home /tmp/dsh-home
+```
+
+The harness needs `pnpm` on `PATH` (`dsh plugin add` shells out to it) and takes
+an absolute tarball path — `dsh plugin add` changes directory into the profile
+first, so a relative path is resolved as a registry package name.
+
+### What only a harness can catch
+
+Four defects in this plugin were invisible to the unit suite because they live in
+the wiring between the RPC surface and the modules, not inside any one module:
+
+- `tool/result` written in the retired V3 shape — every conversation containing a
+  tool call failed to import;
+- a `tool/call` that was not advertised on the preceding `assistant/message` —
+  the session log then read back as corrupt;
+- `syncAll` dropping its direction argument — clicking Export ran an Import;
+- the export cursor sharing a map with the import cursor — the first export
+  wrote an empty file and reported success.
+
+The `direction` scenario exists specifically because of the last two. It syncs a
+binding stored as `in` with an explicit `out` and asserts the file received
+content; that is the only level at which the bug is observable.

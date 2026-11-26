@@ -38,7 +38,9 @@ jobs:
           for required in package/index.js package/client.js package/cordis.patch.yml \
                            package/lib/events.js package/lib/transports.js \
                            package/lib/opencode.js package/lib/pool.js \
-                           package/lib/hostkey.js package/locale/en.json package/locale/zh.json; do
+                           package/lib/hostkey.js \
+                           package/locale/en.json package/locale/zh.json \
+                           package/LICENSE; do
             grep -qx "$required" /tmp/packed.txt || { echo "missing from tarball: $required"; exit 1; }
           done
 

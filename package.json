@@ -1,16 +1,7 @@
 {
   "name": "dsh-conversation-sync",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Import conversations into DSH from Claude Code, Codex CLI, WorkBuddy, TRAE, Antigravity, OpenCode, generic JSONL and DeepSeek exports — and keep them in sync both ways, over SSH too.",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/sheenisme/dsh-conversation-sync.git"
-  },
-  "homepage": "https://github.com/sheenisme/dsh-conversation-sync#readme",
-  "bugs": {
-    "url": "https://github.com/sheenisme/dsh-conversation-sync/issues"
-  },
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -23,14 +14,21 @@
     "opencode",
     "conversation-import"
   ],
-  "type": "module",
+  "license": "MIT",
+  "author": "sheenisme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sheenisme/dsh-conversation-sync.git"
+  },
+  "homepage": "https://github.com/sheenisme/dsh-conversation-sync#readme",
+  "bugs": {
+    "url": "https://github.com/sheenisme/dsh-conversation-sync/issues"
+  },
   "engines": {
     "node": ">=22.13"
   },
+  "type": "module",
   "main": "./index.js",
-  "scripts": {
-    "test": "node --test test/*.test.js"
-  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -47,8 +45,12 @@
     "locale/*.json",
     "README.md",
     "README.zh-CN.md",
-    "docs/DETAIL.md"
+    "docs/DETAIL.md",
+    "LICENSE"
   ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.19.0",
     "fflate": "^0.8.2",
@@ -70,7 +72,9 @@
       "optional": true
     }
   },
-  "icon": "./icon.svg",
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -83,7 +87,5 @@
       ]
     }
   },
-  "publishConfig": {
-    "access": "public"
-  }
+  "icon": "./icon.svg"
 }
