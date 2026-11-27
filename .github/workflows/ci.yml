@@ -222,6 +222,13 @@ jobs:
           node scripts/ci/scenario.mjs --scenario placements \
             --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
             --home "$RUNNER_TEMP/home-placements" --port 5411 --fixtures "$PWD/test/fixtures"
+      # The binding contract: manual by default, gated by its checkbox, and the
+      # direction follows whichever side actually changed.
+      - name: Scenario "bindings" (manual default, checkbox gate, newer side wins)
+        run: |
+          node scripts/ci/scenario.mjs --scenario bindings \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-bindings" --port 5412 --fixtures "$PWD/test/fixtures"
       - name: Upload harness logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

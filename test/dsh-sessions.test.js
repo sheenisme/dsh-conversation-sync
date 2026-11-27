@@ -56,14 +56,29 @@ test('inspectDshLog(): the next turn comes from data.turn, not the envelope', as
 
 test('inspectDshLog(): an empty or turn-less log starts at turn 1', async () => {
   const { persistence, sessions } = facade({ empty: [], noturn: [{ seq: 0, type: 'session/title', data: {} }] })
-  assert.deepEqual(await inspectDshLog({ persistence, sessions, sessionId: 'empty' }), { eventCount: 0, nextTurn: 1 })
+  assert.deepEqual(
+    await inspectDshLog({ persistence, sessions, sessionId: 'empty' }),
+    { eventCount: 0, nextTurn: 1, lastTime: undefined },
+  )
   assert.equal((await inspectDshLog({ persistence, sessions, sessionId: 'noturn' })).nextTurn, 1)
 })
 
 test('inspectDshLog(): a live session is read without opening a handle', async () => {
   const live = { log: [{ seq: 0, type: 'turn/start', data: { turn: 7 } }] }
   const info = await inspectDshLog({ persistence: {}, sessions: { get: () => live }, sessionId: 'x' })
-  assert.deepEqual(info, { eventCount: 1, nextTurn: 8 })
+  // No `time` on this event, so there is no usable stamp to compare sides with.
+  assert.deepEqual(info, { eventCount: 1, nextTurn: 8, lastTime: undefined })
+})
+
+test('inspectDshLog(): reports the newest event time, which is how "newer side" is decided', async () => {
+  const log = [
+    { seq: 0, time: 1000, type: 'turn/start', data: { turn: 1 } },
+    { seq: 1, time: 4000, type: 'user/message', data: {} },
+    { seq: 2, time: 2500, type: 'assistant/message', data: {} },
+  ]
+  const { persistence, sessions } = facade({ t: log })
+  const info = await inspectDshLog({ persistence, sessions, sessionId: 't' })
+  assert.equal(info.lastTime, 4000, 'the newest stamp wins, not the last event read')
 })
 
 test('countDshEvents(): reads the whole log, page by page', async () => {

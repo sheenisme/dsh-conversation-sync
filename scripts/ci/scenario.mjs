@@ -21,6 +21,7 @@
  *   ssh       a session on a "remote" host is discovered and imported over ssh
  *   safety    pre-flight refusal, pre-sync backup, append continuation, "both"
  *   placements the two entry switches default on and toggle independently
+ *   bindings  manual by default, the checkbox gates syncing, newer side wins
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -477,6 +478,85 @@ const scenarios = {
       `restoring both switches failed: ${JSON.stringify(back)}`)
     log(`placements ok: defaults on, sidebar toggled off and back`)
     return { defaults: initial.preferences, stored }
+  },
+
+  async bindings(args, rpc) {
+    const format = FORMATS[0]
+    const { row, binding } = await importFile(rpc, args, format)
+
+    // A fresh binding is manual and checked: it must not sync on its own, but it
+    // must be ready to sync by hand.
+    const listed = await rpc({ action: 'bindings' })
+    const stored = (listed.bindings ?? []).find(item => item.id === binding.id)
+    assert(stored, `the binding disappeared: ${JSON.stringify(listed.bindings)}`)
+    assert(stored.autoSync === false, `a new binding is automatic by default: ${JSON.stringify(stored)}`)
+    assert(stored.checked !== false, `a new binding starts unchecked: ${JSON.stringify(stored)}`)
+    assert(listed.comparisons?.[binding.id], 'the listing must say which side is newer')
+
+    // Unchecking must stop a bulk run from touching it. Pairing itself performs
+    // the first sync (that is what makes a binding useful immediately), so the
+    // witness is the binding's own lastSyncAt: a gated binding keeps the stamp
+    // it had, an included one gets a new one.
+    const target = path.join(args.home, 'gated.jsonl')
+    const paired = await rpc({
+      action: 'pair',
+      binding: { machineId: 'local', externalPath: target, kind: 'claude', direction: 'out', dshSessionIds: [row.id] },
+    })
+    const outBinding = paired.binding ?? paired.result?.binding
+    const outId = outBinding?.id ?? paired.result?.id
+    assert(outId, `pairing an export did not return a binding: ${JSON.stringify(paired)}`)
+
+    const stampOf = async id => {
+      const listing = await rpc({ action: 'bindings' })
+      return (listing.states ?? []).find(item => item.bindingId === id)?.lastSyncAt
+    }
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    await rpc({ action: 'setBinding', id: outId, checked: false })
+    const stampBefore = await stampOf(outId)
+    const skipped = await rpc({ action: 'sync' })
+    assert(!(skipped.results ?? []).some(entry => entry.id === outId),
+      `an unchecked binding was synced by a bulk run: ${JSON.stringify(skipped.results)}`)
+    const stampAfter = await stampOf(outId)
+    assert(stampAfter === stampBefore, `an unchecked binding synced anyway (${stampBefore} -> ${stampAfter})`)
+
+    // Checked again, the bulk run must include it.
+    await rpc({ action: 'setBinding', id: outId, checked: true })
+    const ran = await rpc({ action: 'sync' })
+    const entry = (ran.results ?? []).find(item => item.id === outId)
+    assert(entry, `a checked binding was skipped by a bulk run: ${JSON.stringify(ran.results)}`)
+    const text = await fs.readFile(target, 'utf8')
+    assert(text.trim().length > 0, 'the checked binding reported a sync but wrote nothing')
+
+    // Direction "auto" must follow the comparison. The export above has just
+    // finished, so nothing has moved since: the honest answer is to do nothing
+    // rather than rewrite a file that is already correct.
+    await rpc({ action: 'setBinding', id: outId, direction: 'auto' })
+    const auto = await rpc({ action: 'sync', id: outId })
+    const autoResult = auto.results?.[0] ?? auto
+    assert(!autoResult.error, `an auto sync failed: ${JSON.stringify(autoResult)}`)
+    assert(autoResult.comparison?.newer, `an auto sync did not report a comparison: ${JSON.stringify(autoResult)}`)
+    assert(autoResult.direction === 'none' && autoResult.skipped,
+      `a repeat auto sync did work when nothing had changed: ${JSON.stringify(autoResult)}`)
+
+    // Then the source is edited, so auto must pick import on its own.
+    await fs.appendFile(target, JSON.stringify({
+      type: 'user', timestamp: new Date().toISOString(),
+      message: { role: 'user', content: [{ type: 'text', text: 'edited on the machine' }] },
+    }) + '\n')
+    const auto2 = await rpc({ action: 'sync', id: outId })
+    const auto2Result = auto2.results?.[0] ?? auto2
+    assert(auto2Result.direction === 'in',
+      `auto did not import after the source was edited: ${JSON.stringify(auto2Result)}`)
+    const autoResult2 = auto2Result
+
+    log(`bindings ok: manual default, checkbox gated, repeat auto was a no-op, edited source imported`)
+    return {
+      autoSync: stored.autoSync,
+      checked: stored.checked,
+      repeatAuto: autoResult.direction,
+      editedAuto: autoResult2.direction,
+      newer: autoResult2.comparison.newer,
+    }
   },
 
   async reimport(args, rpc) {

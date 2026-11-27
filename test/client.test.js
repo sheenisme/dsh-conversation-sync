@@ -117,7 +117,9 @@ test('client: both dictionaries carry the same keys, including the settings labe
 test('client: every t() key used by the UI exists in the dictionary', async () => {
   const { dictionaries } = await loadClient()
   const dict = dictionaries['conversation-sync'].en
-  const used = new Set([...source.matchAll(/t\('([a-zA-Z0-9_.]+)'\)/g)].map(match => match[1]))
+  // `t(` must be the translation function itself: `createElement('style')` also
+  // ends in `t(` and used to show up here as a phantom missing key.
+  const used = new Set([...source.matchAll(/(?<![A-Za-z0-9_$.])t\('([a-zA-Z0-9_.]+)'\)/g)].map(match => match[1]))
   const missing = [...used].filter(key => !(key in dict))
   assert.deepEqual(missing, [], `missing locale keys: ${missing.join(', ')}`)
 })

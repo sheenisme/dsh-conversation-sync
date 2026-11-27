@@ -20,16 +20,56 @@ over SSH.
 The panel opens from **Settings → Conversation sync**, from the **sidebar icon**,
 or from **Plugins → Conversation sync**. Both entries are on by default and each
 has its own switch on the page (`Show this page in: ☑ left sidebar ☑ Settings`),
-so you can keep only the one you use. It is a two-column picker:
+so you can keep only the one you use.
 
-- **Left:** every DSH session in this installation.
-- **Right:** sessions found on the selected machine. Switch machines with the
-  buttons on top.
-- Select one session on each side, then choose a direction:
-  `← Import to DSH`, `Export to remote →`, or `⇄ Sync both ways`.
-- If a session exists on only one side, import or export it first; after that
-  it stays in sync.
-- Pairings are listed at the bottom with per-binding sync buttons and status.
+Two collapsible trees, side by side:
+
+- **Left — DSH:** workspace, then its sessions. The workspace is the top level
+  because a session does not record which profile opened it: the session header
+  has no such field and the sessions directory is shared by every profile, so
+  grouping by profile would be a guess. Workspace is also exactly how DSH's own
+  sidebar groups sessions.
+- **Right — machines:** machine, then tool, then its sessions. Each machine
+  shows its SSH key state inline (and lets you set it), plus any discovery
+  error, so an unreachable host explains itself instead of showing an empty list.
+
+Selecting one session on **each** side is what enables the buttons — that pair
+is the unit of work: the left session is what gets written or grown, the right
+one is the source or destination. A row reading **New session** on the left
+covers importing a conversation DSH has never seen.
+
+Then choose how the pair behaves:
+
+| Direction | What it does |
+| --- | --- |
+| `Auto` | Follow whichever side actually changed; do nothing when neither did. |
+| `Import only` / `Export only` | Pin one side, even when the other is newer. |
+| `Both ways` | Both legs when the sides agree, otherwise only the newer one. |
+
+Bindings are listed at the bottom. Each row has:
+
+- a **checkbox** — only checked bindings are synced, by a bulk run or by the
+  automatic poll;
+- a **mode** — **Manual** (the default) or Automatic;
+- the **newer side** at that moment, with the reason on hover;
+- **Sync now** and **Remove**.
+
+### Which side is newer?
+
+Before anything is written, both sides are compared and the direction is derived
+from the comparison. The comparison is anchored on the **last sync**, not on a
+direct comparison of the two timestamps, because those two numbers mean
+different things: a DSH event's `time` is the conversation's own timestamp
+(importing a year-old rollout writes year-old stamps), while a file's `mtime` is
+when it landed on that disk (a copy makes ancient content look brand new).
+Comparing them directly calls a freshly copied old file "newer" forever, and the
+next automatic sync then re-imports it on every poll.
+
+Asking instead *did this side change since we last synced?* is symmetric and
+correct: a side that has not moved cannot hold anything the other is missing. The
+recorded stamps are the file's mtime and size, and the newest DSH event time at
+the moment the sync succeeded. An empty or missing source file is never "newer" —
+there is nothing to read from it — so the sync exports instead.
 
 ## Install
 
@@ -128,7 +168,7 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-149 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+169 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics and file-level session restore, host
 keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
 transport, the one-folder migration, and the browser half through a stub module

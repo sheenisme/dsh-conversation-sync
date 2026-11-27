@@ -12,6 +12,7 @@ import { discoverMachines } from './lib/sshconfig.js'
 import { createHostKeyGuard } from './lib/hostkey.js'
 import { scanMachine } from './lib/discovery.js'
 import { listDshSessions, readDshSessionMessages, dshSessionExists, countDshEvents, inspectDshLog } from './lib/dsh-sessions.js'
+import { compareSides, resolveDirection } from './lib/newer.js'
 import { SyncRollback, diagnoseFailure, preflight } from './lib/rollback.js'
 import { migrateIntoSyncWorkspace } from './lib/dsh-migrate.js'
 
@@ -29,7 +30,9 @@ const KINDS = ['claude', 'codex', 'workbuddy', 'trae', 'antigravity', 'opencode'
 // OpenCode lives in SQLite; writing into a live database from a plugin is not
 // safe, so it is import-only for now.
 const IMPORT_ONLY_KINDS = new Set(['deepseekExport', 'opencode'])
-const DIRECTIONS = ['in', 'out', 'both']
+// 'auto' means "decide from which side is newer"; 'both' means "keep both legs
+// in step", which still defers to the comparison when the sides disagree.
+const DIRECTIONS = ['in', 'out', 'both', 'auto']
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 const SCAN_TTL_MS = 15_000
 const SCAN_INTERVAL_MS = 30_000
@@ -47,7 +50,12 @@ const bindingSchema = z.object({
   direction: z.enum(DIRECTIONS).default('both'),
   keyRef: z.string().optional(),
   pollMs: z.number().min(500).default(2000),
-  autoSync: z.boolean().default(true),
+  // Manual by default: a binding that starts syncing on its own the moment it
+  // is created surprises people, and a wrong direction can overwrite the newer
+  // copy. `checked` is the per-row gate the panel shows; only checked bindings
+  // ever sync, whether by hand or by the poller.
+  autoSync: z.boolean().default(false),
+  checked: z.boolean().default(true),
   enabled: z.boolean().default(true),
 })
 
@@ -73,6 +81,10 @@ const stateSchema = z.object({
   outSeqs: z.record(z.number()).default({}),
   externalSize: z.number().optional(),
   externalMtimeMs: z.number().optional(),
+  // The newest DSH event time as of the last completed sync. Recorded so the
+  // next comparison can ask "did DSH change?" exactly, instead of comparing a
+  // conversation's own timestamp against the wall clock.
+  dshTimeAtSync: z.number().optional(),
   lastSyncAt: z.number().optional(),
   lastError: z.string().optional(),
   lastFailure: failureSchema.optional(),
@@ -438,7 +450,7 @@ export async function apply(ctx, config = {}) {
   const syncBinding = async (binding, forced = false, directionOverride) => {
     const state = getState(binding.id)
     const machine = machineById(binding.machineId)
-    const direction = directionOverride ?? binding.direction
+    const configured = directionOverride ?? binding.direction
     const context = {
       phase: 'sync',
       path: binding.externalPath,
@@ -452,10 +464,26 @@ export async function apply(ctx, config = {}) {
     let transport
     let rollback
     let snapshot
+    let direction = configured
+    let comparison
     try {
       // Pooled: syncing the same machine again (the common case, every poll)
       // must not pay for another SSH handshake.
       transport = await pooledTransport(machine, binding.keyRef)
+
+      // NEWER: decide from the timestamps before writing anything. A binding
+      // set to 'both' used to push DSH text over a source file the user had
+      // edited a minute earlier; comparing first means the newer copy wins and
+      // the older one is only ever appended to.
+      comparison = await compareBindingSides(binding, state, transport)
+      direction = resolveDirection(configured, comparison)
+
+      // Nothing moved on either side, so there is nothing to write. Reporting a
+      // sync here would rewrite a file that is already correct and make the
+      // "did it change?" question unanswerable.
+      if (direction === 'none') {
+        return { id: binding.id, imported: 0, written: 0, direction, configured, comparison, skipped: true }
+      }
 
       // PRE-FLIGHT: read-only. A sync whose preconditions are already broken
       // must mutate nothing, so this runs before any backup or write.
@@ -475,7 +503,7 @@ export async function apply(ctx, config = {}) {
         state.lastFailure = failure
         await saveState(state)
         logger.warn?.(`[conversation-sync] ${binding.name}: ${failure.reason}`)
-        return { id: binding.id, error: failure.reason, failure, direction }
+        return { id: binding.id, error: failure.reason, failure, direction, configured, comparison }
       }
 
       rollback = new SyncRollback({ logger, dshHome: DSH_HOME })
@@ -541,11 +569,21 @@ export async function apply(ctx, config = {}) {
 
       await rollback.succeed(snapshot)
       state.lastSyncAt = Date.now()
+      // Record what each side looked like at this moment, so the next
+      // comparison is an exact "did it change?" rather than a timestamp
+      // guess. Without this a real edit made just after a sync is invisible.
+      const targetForMark = binding.dshSessionIds[0]
+      if (targetForMark) {
+        try {
+          const marked = await inspectDshLog({ persistence, sessions: sessionStore, sessionId: targetForMark })
+          if (marked?.lastTime) state.dshTimeAtSync = marked.lastTime
+        } catch { /* the mark is an optimisation, not a requirement */ }
+      }
       state.lastError = undefined
       state.lastFailure = undefined
       await saveState(state)
       dirty.delete(binding.id)
-      return { id: binding.id, imported, written, direction }
+      return { id: binding.id, imported, written, direction, configured, comparison }
     } catch (error) {
       const outcome = rollback
         ? await rollback.fail(snapshot, error, context, { externalTransport: transport })
@@ -566,13 +604,58 @@ export async function apply(ctx, config = {}) {
       if (machine?.kind === 'ssh' && !failure?.reason?.match(/not found|does not exist|permission/i)) {
         discardTransport(machine)
       }
-      return { id: binding.id, error: failure.reason, failure, direction }
+      return { id: binding.id, error: failure.reason, failure, direction, configured, comparison }
     }
+  }
+
+  /**
+   * Read both sides' modification times.
+   *
+   * Deliberately cheap and read-only: one stat over the existing transport plus
+   * the newest event time from the DSH log. Any failure degrades to 'unknown',
+   * which makes the caller keep its configured direction instead of guessing.
+   */
+  const compareBindingSides = async (binding, state, transport) => {
+    let externalMtimeMs
+    let externalSize
+    try {
+      const stat = await transport.stat(binding.externalPath)
+      externalMtimeMs = stat?.mtimeMs
+      externalSize = stat?.size
+    } catch {
+      externalMtimeMs = undefined
+      externalSize = undefined
+    }
+    let dshLastTime
+    const sessionId = binding.dshSessionIds?.[0]
+    if (sessionId) {
+      try {
+        const inspected = await inspectDshLog({ persistence, sessions: sessionStore, sessionId })
+        dshLastTime = inspected?.lastTime
+      } catch {
+        dshLastTime = undefined
+      }
+    }
+    return compareSides({
+      externalMtimeMs,
+      externalSize,
+      externalPrevMtimeMs: state.externalMtimeMs,
+      externalPrevSize: state.externalSize,
+      dshLastTime,
+      dshTimeAtSync: state.dshTimeAtSync,
+      lastSyncAt: state.lastSyncAt,
+      direction: binding.direction,
+    })
   }
 
   const syncAll = async (forced = false, direction) => {
     const results = []
     for (const binding of allBindings()) {
+      // `checked` is the per-row gate the panel shows: an unchecked binding is
+      // parked, not deleted, and never syncs — not on a poll, and not on a bulk
+      // "sync everything" either. Only pressing that row's own button syncs it
+      // (that path calls syncBinding directly, not this function).
+      if (binding.checked === false) continue
       if (forced || (binding.enabled && binding.autoSync)) {
         // The direction has to be passed through: without it every binding falls
         // back to its own stored direction, so "sync out" from the UI silently
@@ -715,6 +798,7 @@ export async function apply(ctx, config = {}) {
       syncing = true
       try {
         for (const binding of allBindings()) {
+          if (binding.checked === false) continue
           if (!binding.enabled || !binding.autoSync) continue
           const now = Date.now()
           const due = now - (lastPoll.get(binding.id) ?? 0) >= (binding.pollMs ?? 2000)
@@ -766,11 +850,53 @@ export async function apply(ctx, config = {}) {
 
       case 'sessions': {
         const cache = await scanExternal(!!body.force)
-        return Response.json({ dsh: cache.dsh, external: cache.byMachine, errors: cache.errors, warnings: machinesCache.warnings, at: cache.at })
+        // The panel groups the DSH side by workspace, and a session cannot name
+        // its profile (the header has no such field), so the workspace list is
+        // the only honest first level. `sessionIds` comes back already filtered
+        // by cwd equality inside the registry.
+        let workspaceList = []
+        try {
+          workspaceList = (workspaces.list?.() ?? []).map(workspace => ({
+            id: String(workspace.id ?? workspace.workspaceId ?? ''),
+            path: workspace.path,
+            title: workspace.title,
+            sessionIds: [...(workspace.sessionIds ?? [])],
+          }))
+        } catch (error) {
+          logger.warn?.(`[conversation-sync] cannot list workspaces: ${error?.message ?? error}`)
+        }
+        return Response.json({
+          dsh: cache.dsh,
+          external: cache.byMachine,
+          errors: cache.errors,
+          warnings: machinesCache.warnings,
+          workspaces: workspaceList,
+          at: cache.at,
+        })
       }
 
-      case 'bindings':
-        return Response.json({ bindings: allBindings(), states: [...statesTable.entries()].map(([, value]) => value) })
+      case 'bindings': {
+        const list = allBindings()
+        // Which side is newer, per binding, so the panel can say so before the
+        // user presses anything. A failure here must not fail the listing: an
+        // unreachable machine just reports no comparison.
+        const comparisons = {}
+        await Promise.all(list.map(async binding => {
+          const machine = machineById(binding.machineId)
+          if (!machine) return
+          try {
+            const transport = await pooledTransport(machine, binding.keyRef)
+            comparisons[binding.id] = await compareBindingSides(binding, getState(binding.id), transport)
+          } catch {
+            comparisons[binding.id] = { newer: 'unknown', direction: 'both', reason: 'the machine could not be reached' }
+          }
+        }))
+        return Response.json({
+          bindings: list,
+          states: [...statesTable.entries()].map(([, value]) => value),
+          comparisons,
+        })
+      }
 
       case 'preferences':
         return Response.json({ preferences: await readPreferences() })
@@ -828,6 +954,25 @@ export async function apply(ctx, config = {}) {
           return Response.json({ result })
         }
         return Response.json({ binding: getBinding(binding.id), result })
+      }
+
+      case 'setBinding': {
+        const id = String(body.id ?? '')
+        const binding = getBinding(id)
+        if (!binding) return Response.json({ error: 'binding not found' }, { status: 404 })
+        const next = { ...binding }
+        if (body.checked !== undefined) next.checked = body.checked !== false
+        if (body.autoSync !== undefined) next.autoSync = body.autoSync === true
+        if (body.direction !== undefined) {
+          if (!DIRECTIONS.includes(body.direction)) {
+            return Response.json({ error: `unknown direction: ${body.direction}` }, { status: 400 })
+          }
+          next.direction = body.direction
+        }
+        if (body.enabled !== undefined) next.enabled = body.enabled !== false
+        await bindingsTable.put(id, next)
+        if (next.checked === false) dirty.delete(id)
+        return Response.json({ binding: getBinding(id) })
       }
 
       case 'unbind': {

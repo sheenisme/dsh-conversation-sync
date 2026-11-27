@@ -266,7 +266,7 @@ that unit fixtures cannot:
 | `install-dsh.mjs` | installs one DSH version so it can actually run under plain Node — it reads `@deepseek-ai/dsh-app-boot`'s peer ranges from the registry, because npm does not install the peers of a transitive package |
 | `harness.mjs` | shared profile bootstrap, health-line wait, activation check and auth-cookie handshake |
 | `boot-check.mjs` | "does this DSH version support the plugin": install, boot, import, read back |
-| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `empty`, `reimport`, `direction`, `keys`, `ssh`, `safety`, `placements` — the user journey over the real RPC surface |
+| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `empty`, `reimport`, `direction`, `keys`, `ssh`, `safety`, `placements`, `bindings` — the user journey over the real RPC surface |
 
 `.github/workflows/ci.yml` runs three jobs:
 
@@ -335,6 +335,41 @@ that no dead binding was left in the list.
 The `direction` scenario exists specifically for the `syncAll` and cursor
 defects. It syncs a binding stored as `in` with an explicit `out` and asserts the
 file received content; that is the only level at which the bug is observable.
+
+The `bindings` scenario covers the binding contract, none of which a unit test
+can reach: a new binding is manual (`autoSync === false`) and checked, the
+listing reports which side is newer, unchecking removes the binding from a bulk
+run (the witness is its `lastSyncAt`, since pairing performs the first sync
+itself), re-checking puts it back and writes a non-empty file, and direction
+`auto` does nothing when nothing changed but imports as soon as the source is
+appended to.
+
+## Which side is newer
+
+`lib/newer.js` decides the direction from a comparison, and the comparison is
+anchored on `lastSyncAt` plus the stamps recorded at the last successful sync
+(the file's mtime and size, and the newest DSH event time), not on a direct
+comparison of the two timestamps.
+
+The reason is that the two numbers mean different things. A DSH event's `time`
+is the conversation's own timestamp, so importing a year-old rollout writes
+year-old stamps; a file's `mtime` is when it landed on that disk, so a copy makes
+ancient content look new. Comparing them directly declares a freshly copied old
+file the winner forever, and the next automatic sync re-imports it on every poll
+— which is exactly what happened: a fixture whose conversation was 329 days old
+was reported as "the source changed 329d after DSH did" because its mtime was
+recent.
+
+Asking *did this side change since the last sync?* is symmetric and has no such
+failure mode. Two consequences are pinned by tests:
+
+- an empty or missing source file is never "newer" — there is nothing to read
+  from it, so the sync exports (`the source file is empty` /
+  `the source file does not exist yet`);
+- `auto` with nothing changed resolves to `none`, and `syncBinding` returns
+  `{imported: 0, written: 0, direction: 'none', skipped: true}` without touching
+  either side. Rewriting a file that is already correct makes "did it change?"
+  unanswerable.
 
 ## Pre-flight, backup and verification
 
