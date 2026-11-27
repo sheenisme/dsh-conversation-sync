@@ -56,32 +56,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Trusted Publishing: no long-lived token. npm verifies this workflow via
+      # the OIDC identity GitHub mints for the job (hence id-token: write), and
+      # attaches a provenance statement. It needs npm >= 11.5.1 on the runner
+      # and a one-time "Trusted Publisher" entry on the package's npm settings
+      # page pointing at this repo + this workflow filename.
+      #
+      # A granular token with "Bypass 2FA" is NOT a good fallback any more: npm
+      # is deprecating 2FA-bypassing tokens for direct publishing, and a token
+      # without that flag fails with EOTP and a browser URL CI cannot open.
       - uses: actions/setup-node@v4
         with:
           node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
-      # The token must be a granular access token with "read and write" and
-      # "bypass 2FA" — npm rejects a plain session token for publishing even
-      # when the account has 2FA disabled. A token WITHOUT bypass 2FA
-      # authenticates fine (npm whoami succeeds) and only fails at the last
-      # step, with EOTP and a browser URL nobody can open from CI, so check the
-      # difference up front and name the fix.
-      - name: The token must publish without a one-time password
+      - name: npm version
         run: |
-          whoami=$(npm whoami || true)
-          if [ -z "$whoami" ]; then
-            echo "::error::NPM_TOKEN is missing or invalid"
-            exit 1
-          fi
-          echo "authenticated as $whoami"
-          if npm publish --dry-run --access public 2>&1 | tee /tmp/dry.txt | grep -q EOTP; then
-            echo "::error::NPM_TOKEN requires a one-time password. Create a granular token at https://www.npmjs.com/settings/$whoami/tokens with read+write, this package, and Bypass 2FA checked; then update the NPM_TOKEN secret."
-            exit 1
-          fi
-          echo "the token can publish without an OTP"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish
+          npm --version
+          node -e 'const [maj,min]=require("child_process").execSync("npm --version").toString().trim().split(".").map(Number); if (maj<11||(maj===11&&min<5)) { console.error("::error::trusted publishing needs npm >= 11.5.1, found "+maj+"."+min); process.exit(1) }'
+      - name: Publish with provenance
         run: npm publish --access public --provenance
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Deliberately NOT set: no NODE_AUTH_TOKEN. With OIDC the CLI obtains
+          # a short-lived credential from the registry itself.
+          NPM_CONFIG_PROVENANCE: 'true'
