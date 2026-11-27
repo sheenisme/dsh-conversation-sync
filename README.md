@@ -84,6 +84,13 @@ space, and so on. Nothing is left for you to guess.
 > restored on failure, but data loss is still possible. Keep your own backups
 > and leave the export direction off for sources you cannot afford to lose.
 
+## Releasing
+
+A `v*` tag publishes automatically (`.github/workflows/publish.yml`) via npm
+Trusted Publishing — no token in the repo. It only works after a one-time
+*Trusted Publisher* entry is added on the package's npm settings page for this
+repository and workflow file.
+
 ## Development
 
 ```bash

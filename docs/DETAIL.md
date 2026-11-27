@@ -290,6 +290,23 @@ The harness needs `pnpm` on `PATH` (`dsh plugin add` shells out to it) and takes
 an absolute tarball path — `dsh plugin add` changes directory into the profile
 first, so a relative path is resolved as a registry package name.
 
+### Releasing
+
+`.github/workflows/publish.yml` runs on a `v*` tag, refuses to publish unless the
+tag equals `package.json`'s version and the tarball contains the files the plugin
+needs at runtime, then publishes with **npm Trusted Publishing (OIDC)** — no
+long-lived token. npm verifies the workflow's OIDC identity and attaches a
+provenance statement to the release.
+
+That requires one manual setup step, once: the package's npm settings page needs
+a *Trusted Publisher* entry naming this repository and this workflow file. Without
+it the publish step fails authentication.
+
+A granular token with "Bypass 2FA" is deliberately not the mechanism any more.
+npm is deprecating 2FA-bypassing tokens for direct publishing, and a token
+without that flag authenticates fine and then dies with `EOTP` plus a browser URL
+nobody can open from CI — which is exactly what the first tagged release did.
+
 ### What only a harness can catch
 
 Four defects in this plugin were invisible to the unit suite because they live in

@@ -67,6 +67,12 @@ OpenCode 与 DeepSeek 导出**只能导入** —— OpenCode 的会话存在活�
 > **警告 —— 导出会改动真实文件。** 导出会把消息追加到原工具的活动会话文件里。每次写入前都
 > 会备份、失败会还原，但仍有可能造成数据丢失。请自行备份，对不能丢失的来源请关闭导出方向。
 
+## 发布
+
+打一个 `v*` tag 就会自动发布（`.github/workflows/publish.yml`），走 npm Trusted
+Publishing，仓库里不存任何 token。**前提**是在 npm 该包的设置页添加一次
+*Trusted Publisher*，指向本仓库与这个 workflow 文件。
+
 ## 开发
 
 ```bash
