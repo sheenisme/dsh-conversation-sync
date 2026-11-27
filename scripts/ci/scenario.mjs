@@ -19,6 +19,8 @@
  *   reimport  syncing twice does not duplicate already-imported content
  *   keys      SSH keys resolve credential -> IdentityFile -> ~/.ssh defaults
  *   ssh       a session on a "remote" host is discovered and imported over ssh
+ *   safety    pre-flight refusal, pre-sync backup, append continuation, "both"
+ *   placements the two entry switches default on and toggle independently
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -355,6 +357,126 @@ const scenarios = {
     assert(/List the files/.test(row.preview ?? ''), `the ssh import lost its text: ${row.preview}`)
     log(`ssh ok: discovered ${rows.length} rollout(s), imported ${result.imported} record(s), ${row.count} message(s)`)
     return { discovered: rows.length, imported: result.imported, messages: row.count }
+  },
+
+  /**
+   * Pre-flight + backup + verification + rollback, in both directions.
+   *
+   * These are the guarantees the user asked for, and each one is invisible in a
+   * unit test: the checks run inside a live sync against a real session store.
+   */
+  async safety(args, rpc) {
+    const { row, binding } = await importFile(rpc, args, FORMATS[0])
+
+    // 1. A sync whose source is gone must be REFUSED before anything is touched,
+    //    and the refusal must name the check that failed.
+    const missing = path.join(args.home, 'vanished.jsonl')
+    const refused = await rpc({
+      action: 'pair',
+      binding: { machineId: 'local', externalPath: missing, kind: 'claude', direction: 'in', dshSessionIds: [] },
+    })
+    const refusedResult = refused.result ?? refused
+    assert(refusedResult.error, `a missing source was not refused: ${JSON.stringify(refused)}`)
+    assert(refusedResult.failure?.preflight === true, `the refusal did not come from the pre-flight: ${JSON.stringify(refusedResult.failure)}`)
+    assert(refusedResult.failure?.check === 'source-read', `unexpected failing check: ${refusedResult.failure?.check}`)
+    assert((refusedResult.failure?.checks ?? []).some(item => item.id === 'data-root' && item.ok),
+      'the pre-flight did not report the checks it ran')
+    log(`preflight ok: refused at check "${refusedResult.failure.check}"`)
+
+    // 2. An export that cannot be written must leave the target byte-identical,
+    //    and must have taken a backup first.
+    const target = path.join(args.home, 'protected.jsonl')
+    const original = '{"keep":"me"}\n'
+    await fs.writeFile(target, original)
+    await fs.chmod(target, 0o444)
+    const blocked = await rpc({
+      action: 'pair',
+      binding: { machineId: 'local', externalPath: target, kind: 'claude', direction: 'out', dshSessionIds: [row.id] },
+    })
+    const blockedResult = blocked.result ?? blocked
+    const afterText = await fs.readFile(target, 'utf8')
+    await fs.chmod(target, 0o644)
+    assert(blockedResult.error, `an unwritable target reported success: ${JSON.stringify(blocked)}`)
+    assert(afterText === original, `the failed export modified the target: ${JSON.stringify(afterText)}`)
+    assert((blockedResult.failure?.backupPaths ?? []).length > 0,
+      `a failed sync kept no backup: ${JSON.stringify(blockedResult.failure)}`)
+    for (const backupPath of blockedResult.failure.backupPaths) {
+      await fs.access(backupPath)
+    }
+    log(`backup ok: ${blockedResult.failure.backupPaths.length} backup(s) before the write`)
+
+    // 3. Appending to an existing session must continue its turns, not restart
+    //    them at 1 - the backend refuses that with "turn/start does not open the
+    //    expected turn". Two different sources into one session proves it.
+    const second = await rpc({
+      action: 'pair',
+      binding: {
+        machineId: 'local', externalPath: path.join(args.fixtures, FORMATS[1].file),
+        kind: FORMATS[1].kind, direction: 'in', dshSessionIds: [row.id],
+      },
+    })
+    const secondResult = second.result ?? second
+    assert(!secondResult.error, `appending to an existing session failed: ${JSON.stringify(secondResult)}`)
+    assert((secondResult.imported ?? 0) > 0, `the append imported nothing: ${JSON.stringify(second)}`)
+    const listing = await rpc({ action: 'sessions', force: true })
+    const grown = (listing.dsh ?? []).find(item => item.id === row.id)
+    assert(grown, 'the appended session disappeared')
+    assert(grown.count > row.count, `the session did not grow: ${row.count} -> ${grown.count}`)
+    log(`append ok: ${row.count} -> ${grown.count} message(s) in one session`)
+
+    // 4. Both directions in one call, so the import and the export share a
+    //    backup and a verification.
+    const bothTarget = path.join(args.home, 'both.jsonl')
+    await fs.writeFile(bothTarget, '')
+    const both = await rpc({
+      action: 'pair',
+      binding: {
+        machineId: 'local', externalPath: bothTarget,
+        kind: 'claude', direction: 'both', dshSessionIds: [row.id],
+      },
+    })
+    const bothResult = both.result ?? both
+    assert(!bothResult.error, `a "both" sync failed: ${JSON.stringify(bothResult)}`)
+    assert((bothResult.written ?? 0) > 0, `a "both" sync wrote nothing: ${JSON.stringify(bothResult)}`)
+    const exported = await fs.readFile(bothTarget, 'utf8')
+    assert(exported.trim().length > 0, 'the "both" export is empty')
+    log(`both ok: ${bothResult.imported ?? 0} imported, ${bothResult.written} written`)
+
+    return {
+      preflight: refusedResult.failure.check,
+      backups: blockedResult.failure.backupPaths.length,
+      messages: grown.count,
+      written: bothResult.written,
+    }
+  },
+
+  /**
+   * The two placement switches. Both entries must default to ON, and turning
+   * one off must leave the other alone - in the host's stored preferences, which
+   * is what the panel reads before it registers anything.
+   */
+  async placements(args, rpc) {
+    const initial = await rpc({ action: 'preferences' })
+    assert(initial.preferences?.sidebarEntry !== false, `the sidebar entry is off by default: ${JSON.stringify(initial)}`)
+    assert(initial.preferences?.settingsEntry !== false, `the Settings entry is off by default: ${JSON.stringify(initial)}`)
+
+    const off = await rpc({ action: 'setPreferences', sidebarEntry: false })
+    assert(off.preferences?.sidebarEntry === false, `setPreferences did not persist: ${JSON.stringify(off)}`)
+    assert(off.preferences?.settingsEntry === true, `turning off the sidebar also turned off Settings: ${JSON.stringify(off)}`)
+
+    const reread = await rpc({ action: 'preferences' })
+    assert(reread.preferences?.sidebarEntry === false, 'the preference did not survive a re-read')
+    assert(reread.preferences?.settingsEntry === true, 'the other preference changed on its own')
+
+    // It must survive a restart, not just a round trip.
+    const stored = JSON.parse(await fs.readFile(path.join(args.home, 'conversation-sync', 'preferences.json'), 'utf8'))
+    assert(stored.sidebarEntry === false, `the preferences file does not hold the change: ${JSON.stringify(stored)}`)
+
+    const back = await rpc({ action: 'setPreferences', sidebarEntry: true, settingsEntry: true })
+    assert(back.preferences?.sidebarEntry === true && back.preferences?.settingsEntry === true,
+      `restoring both switches failed: ${JSON.stringify(back)}`)
+    log(`placements ok: defaults on, sidebar toggled off and back`)
+    return { defaults: initial.preferences, stored }
   },
 
   async reimport(args, rpc) {

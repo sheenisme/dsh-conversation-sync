@@ -152,6 +152,17 @@ test('buildEvents(): startSeq/startTurn honored and seq contiguous', () => {
   for (let i = 1; i < events.length; i++) assert.equal(events[i].seq, events[i - 1].seq + 1)
 })
 
+test('buildEvents(): an appended batch does not repeat the protected system head', () => {
+  // Only the session's first turn carries the system/message head. Repeating it
+  // on an append is a second head in the middle of the log, and the backend
+  // rejects the append.
+  const first = buildEvents([{ role: 'user', text: 'one', ts: 1 }], { startTurn: 1, createId })
+  assert.equal(first.filter(event => event.type === 'system/message').length, 1)
+  const appended = buildEvents([{ role: 'user', text: 'two', ts: 2 }], { startSeq: first.length, startTurn: 2, createId })
+  assert.equal(appended.filter(event => event.type === 'system/message').length, 0)
+  assert.equal(appended[0].data.turn, 2)
+})
+
 test('messagesFromEvents(): extracts user/assistant text, skips system/tool', () => {
   const b = new EventBuilder({ createId })
   b.turn({ turn: 1, ts: 1, user: { text: 'hello' }, assistant: { text: 'world' } })

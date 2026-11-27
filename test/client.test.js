@@ -13,7 +13,20 @@ import { fileURLToPath } from 'node:url'
 const here = path.dirname(fileURLToPath(import.meta.url))
 const source = fs.readFileSync(path.join(here, '..', 'client.js'), 'utf8')
 
-function loadClient() {
+// apply() reads the stored placement preferences before registering anything
+// (so an entry the user turned off never flashes on). That makes registration
+// asynchronous, so this helper awaits the fetch it performs.
+async function loadClient(preferences = { sidebarEntry: true, settingsEntry: true }) {
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ preferences }) })
+  try {
+    return await loadClientSync()
+  } finally {
+    globalThis.fetch = previousFetch
+  }
+}
+
+async function loadClientSync() {
   let definition
   globalThis.window = { __ModuleLoader__: { load: value => { definition = value } } }
   // eslint-disable-next-line no-new-func
@@ -39,11 +52,13 @@ function loadClient() {
     react: { useCallback: () => {}, useEffect: () => {}, memo: () => {}, useMemo: () => {}, useState: () => [] },
   })[name])
   module.apply(ctx)
+  // Let the preferences fetch resolve and its .then register the entries.
+  for (let i = 0; i < 5; i += 1) await new Promise(resolve => setImmediate(resolve))
   return { module, dictionaries, registrations, definition }
 }
 
-test('client: declares the services it actually uses', () => {
-  const { module } = loadClient()
+test('client: declares the services it actually uses', async () => {
+  const { module } = await loadClient()
   // `sessions` is not decoration: without it the sidebar never learns about a
   // session the plugin just wrote, which was a reported bug.
   assert.ok(module.inject.includes('sessions'), 'the sessions service must be injected')
@@ -51,8 +66,8 @@ test('client: declares the services it actually uses', () => {
   assert.ok(module.inject.includes('locale'))
 })
 
-test('client: registers the panel and a settings sidebar entry', () => {
-  const { registrations } = loadClient()
+test('client: registers the panel and a settings sidebar entry', async () => {
+  const { registrations } = await loadClient()
   const names = registrations.map(entry => entry.name)
   assert.ok(names.includes('plugins.bundle.config'), 'the plugin panel must stay registered')
   assert.ok(names.includes('settings.section'), 'the feature must be reachable from Settings')
@@ -63,8 +78,34 @@ test('client: registers the panel and a settings sidebar entry', () => {
   assert.ok(Number.isFinite(section.order))
 })
 
-test('client: both dictionaries carry the same keys, including the settings label', () => {
-  const { dictionaries } = loadClient()
+test('client: the sidebar entry is a real sidebar panel, on by default', async () => {
+  const { registrations } = await loadClient()
+  const names = registrations.map(entry => entry.name)
+  assert.ok(names.includes('sidebar.panellist'), 'the feature must also live in the left sidebar')
+  assert.ok(names.includes('main'), 'a sidebar panel needs a page to show')
+  const panel = registrations.find(entry => entry.name === 'sidebar.panellist')
+  assert.equal(panel.id, 'dsh-conversation-sync')
+  assert.equal(typeof panel.label, 'function')
+})
+
+test('client: a placement switched off is never registered', async () => {
+  const { registrations } = await loadClient({ sidebarEntry: false, settingsEntry: true })
+  const names = registrations.map(entry => entry.name)
+  assert.ok(names.includes('settings.section'), 'Settings stays when only the sidebar is off')
+  assert.ok(!names.includes('sidebar.panellist'), 'the sidebar entry must not appear when its switch is off')
+  assert.ok(!names.includes('main'), 'the sidebar page must not be registered either')
+})
+
+test('client: turning off Settings removes only that entry', async () => {
+  const { registrations } = await loadClient({ sidebarEntry: true, settingsEntry: false })
+  const names = registrations.map(entry => entry.name)
+  assert.ok(!names.includes('settings.section'), 'the Settings entry must not appear when its switch is off')
+  assert.ok(!names.includes('settings.section.icon'))
+  assert.ok(names.includes('sidebar.panellist'), 'the sidebar entry is independent')
+})
+
+test('client: both dictionaries carry the same keys, including the settings label', async () => {
+  const { dictionaries } = await loadClient()
   const dict = dictionaries['conversation-sync']
   assert.ok(dict, 'the conversation-sync dictionaries must be registered')
   const en = Object.keys(dict.en).sort()
@@ -73,8 +114,8 @@ test('client: both dictionaries carry the same keys, including the settings labe
   assert.ok(en.includes('settings.nav'), 'the Settings entry needs a label key')
 })
 
-test('client: every t() key used by the UI exists in the dictionary', () => {
-  const { dictionaries } = loadClient()
+test('client: every t() key used by the UI exists in the dictionary', async () => {
+  const { dictionaries } = await loadClient()
   const dict = dictionaries['conversation-sync'].en
   const used = new Set([...source.matchAll(/t\('([a-zA-Z0-9_.]+)'\)/g)].map(match => match[1]))
   const missing = [...used].filter(key => !(key in dict))

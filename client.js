@@ -40,12 +40,17 @@ window.__ModuleLoader__.load({
       error: { color: '#e05252', fontSize: 12, margin: '4px 0' },
       condition: { fontSize: 12, marginLeft: 16, opacity: 0.85 },
       list: { maxHeight: 380, overflowY: 'auto' },
+      check: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, cursor: 'pointer' },
     }
 
     // Materializing a session writes it to disk, but the browser sidebar is fed
     // by the host's in-memory session list. Without this refresh the imported
     // sessions only appear after a full page reload — which is exactly what a
     // user reported ("imported, workspace created, no sessions shown").
+    // Where the two entries live. Both are on by default; each toggle registers
+    // or disposes its own slot entry, so turning one off removes it immediately
+    // instead of waiting for a reload.
+    let applyPlacement = () => {}
     let tr = key => en[key] ?? key
     let hostSessions
     const refreshDshSessions = async () => {
@@ -75,13 +80,15 @@ window.__ModuleLoader__.load({
       // loading state, not an empty one: showing "no sessions" for it is what
       // made the panel look empty for the first seconds after it opened.
       const [loading, setLoading] = useState(true)
+      const [prefs, setPrefs] = useState({ sidebarEntry: true, settingsEntry: true })
 
       const load = useCallback(async (force = false) => {
         try {
-          const [m, sess, b] = await Promise.all([
+          const [m, sess, b, p] = await Promise.all([
             rpc('machines', force ? { refresh: true } : {}),
             rpc('sessions', { force }),
             rpc('bindings'),
+            rpc('preferences'),
           ])
           setMachines(m.machines ?? [])
           setMachineWarnings(m.warnings ?? [])
@@ -89,6 +96,7 @@ window.__ModuleLoader__.load({
           setCache(sess)
           setBindings(b.bindings ?? [])
           setStates(b.states ?? [])
+          setPrefs(p.preferences ?? { sidebarEntry: true, settingsEntry: true })
           setError('')
           setLoading(false)
         } catch (e) {
@@ -104,6 +112,16 @@ window.__ModuleLoader__.load({
       const stateFor = id => states.find(x => x.bindingId === id)
       const boundExternal = path => bindings.find(b => b.externalPath === path && b.machineId === machineFilter)
       const boundDsh = id => bindings.find(b => b.dshSessionIds?.includes(id))
+
+      const setPreference = async patch => {
+        try {
+          const next = await rpc('setPreferences', patch)
+          setPrefs(next.preferences ?? prefs)
+          // The placement of the entries is a client decision, so the change has
+          // to be applied here; the host only remembers it.
+          applyPlacement?.(next.preferences)
+        } catch (e) { setError(e.message) }
+      }
 
       const pair = async direction => {
         if (!right) { setError(t('panel.pickRight')); return }
@@ -167,6 +185,25 @@ window.__ModuleLoader__.load({
           jsx('h3', { style: { margin: 0, marginRight: 8 }, children: t('panel.title') }),
           jsx('button', { style: s.button, onClick: () => void load(true), disabled: busy, children: t('panel.refresh') }),
           jsx('span', { style: s.small, children: t('panel.subtitle') }),
+        ] }),
+        jsxs('div', { style: s.row, children: [
+          jsx('span', { style: s.small, children: t('panel.placement') }),
+          jsxs('label', { style: s.check, children: [
+            jsx('input', {
+              type: 'checkbox',
+              checked: prefs.sidebarEntry !== false,
+              onChange: e => void setPreference({ sidebarEntry: e.target.checked }),
+            }),
+            t('panel.sidebarEntry'),
+          ] }),
+          jsxs('label', { style: s.check, children: [
+            jsx('input', {
+              type: 'checkbox',
+              checked: prefs.settingsEntry !== false,
+              onChange: e => void setPreference({ settingsEntry: e.target.checked }),
+            }),
+            t('panel.settingsEntry'),
+          ] }),
         ] }),
         error ? jsx('div', { style: s.error, children: error }) : null,
         lastResult?.failure ? jsxs('div', { style: s.error, children: [
@@ -305,6 +342,9 @@ window.__ModuleLoader__.load({
       'panel.arrowsHint': 'Select one session on each side, then choose a direction. A one-sided session is imported/exported first, then kept in sync.',
       'panel.bindings': 'Active sync bindings', 'panel.bound': 'bound:', 'panel.externalOnly': 'No DSH session yet — use Import to create one, or select a DSH session on the left before exporting.',
       'panel.loading': 'Loading sessions… (the plugin host is still starting)',
+      'panel.placement': 'Show this page in:',
+      'panel.sidebarEntry': 'left sidebar',
+      'panel.settingsEntry': 'Settings',
       'panel.noDsh': 'No DSH sessions found.', 'panel.noExternal': 'No sessions found on this machine. Configure the SSH key and refresh.',
       'panel.noBindings': 'No bindings yet. Pick two sessions above and choose a direction.',
       'panel.lastSync': 'Last sync:', 'panel.failure': 'Sync failed:', 'panel.pickLeft': 'Select a DSH session on the left first.',
@@ -326,6 +366,9 @@ window.__ModuleLoader__.load({
       'panel.arrowsHint': '左右各选一个会话，再选择方向。只有一侧有的会话会先导入/导出，然后保持同步。',
       'panel.bindings': '生效中的同步绑定', 'panel.bound': '已绑定：', 'panel.externalOnly': '尚无 DSH 会话——先点“导入”创建，或先在左侧选中 DSH 会话再导出。',
       'panel.loading': '正在加载会话……（插件宿主还在启动）',
+      'panel.placement': '入口位置：',
+      'panel.sidebarEntry': '左侧边栏',
+      'panel.settingsEntry': '设置页',
       'panel.noDsh': '未找到 DSH 会话。', 'panel.noExternal': '该机器上未找到会话。请配置 SSH 私钥后刷新。',
       'panel.noBindings': '还没有绑定。在上方选择两个会话并选择方向。',
       'panel.lastSync': '上次同步：', 'panel.failure': '同步失败：', 'panel.pickLeft': '请先在左侧选择一个 DSH 会话。',
@@ -336,6 +379,21 @@ window.__ModuleLoader__.load({
     }
 
     const inject = ['slots', 'locale', 'sessions']
+
+    // The same 16px mark in every seat. The slots pass {size, active}; drawing a
+    // real SVG (not a text arrow) keeps it on the same baseline and width as the
+    // built-in icons at any font.
+    const MarkIcon = ({ size = 16, active } = {}) => jsx('svg', {
+      width: size, height: size, viewBox: '0 0 16 16', fill: 'none',
+      stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
+      'aria-hidden': true, opacity: active === false ? 0.75 : 1,
+      'data-conversation-sync-icon': true,
+      children: [
+        // Two opposed arrows: the bidirectional promise of the feature.
+        jsx('path', { d: 'M2.5 5.5h8.5M8.5 3l2.5 2.5-2.5 2.5', key: 'a' }),
+        jsx('path', { d: 'M13.5 10.5H5M7.5 8 5 10.5 7.5 13', key: 'b' }),
+      ],
+    })
 
     function apply(ctx) {
       hostSessions = ctx.sessions
@@ -349,33 +407,81 @@ window.__ModuleLoader__.load({
           return text === key ? (en[key] ?? key) : text
         }
       } catch { /* keep the English dictionary fallback */ }
+
       ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
         name: 'plugins.bundle.config', key: PKG, locale: NS,
       }, ({ t, view }) => (view === 'summary' ? t('summary') : jsx(Page, { t })))), 'conversation-sync/page')
 
-      // Also reachable from Settings, as its own sidebar entry, so the feature
-      // is discoverable without hunting through the plugin inventory.
-      ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
+      // Two independent placements, each with its own switch (both default on):
+      //
+      //   settingsEntry - a section in Settings, where a feature like this is
+      //                   expected to be found.
+      //   sidebarEntry  - a panel icon in the left sidebar, for one-click access
+      //                   without opening Settings.
+      //
+      // Each registration is disposed when its switch turns off, so the entry
+      // disappears immediately rather than at the next reload.
+      const entries = {
+        settingsEntry: null,
+        sidebarEntry: null,
+      }
+
+      const registerSettings = () => ctx.slots.inject('settings.section', () => ctx.slots.register({
         name: 'settings.section', id: PKG, order: 45, locale: NS,
         label: () => tr('settings.nav'),
-      }, () => jsx(Page, { t: tr }))), 'conversation-sync/settings')
+      }, () => jsx(Page, { t: tr })))
 
-      // The slot passes {size, active}. Draw a real 16px icon instead of a text
-      // arrow: the nav renders icons at a fixed size next to SVG icons, and a
-      // glyph sits on a different baseline and changes width across fonts.
-      ctx.effect(() => ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
+      const registerSettingsIcon = () => ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
         name: 'settings.section.icon', id: PKG, order: 45,
-      }, ({ size = 16, active } = {}) => jsx('svg', {
-        width: size, height: size, viewBox: '0 0 16 16', fill: 'none',
-        stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
-        'aria-hidden': true, opacity: active === false ? 0.75 : 1,
-        'data-conversation-sync-icon': true,
-        children: [
-          // Two opposed arrows: the bidirectional promise of the feature.
-          jsx('path', { d: 'M2.5 5.5h8.5M8.5 3l2.5 2.5-2.5 2.5', key: 'a' }),
-          jsx('path', { d: 'M13.5 10.5H5M7.5 8 5 10.5 7.5 13', key: 'b' }),
-        ],
-      }))), 'conversation-sync/settings-icon')
+      }, MarkIcon))
+
+      const registerSidebar = () => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+        name: 'sidebar.panellist', id: PKG, order: 30, locale: NS,
+        label: () => tr('settings.nav'),
+      }, ({ size = 16, active } = {}) => jsx(MarkIcon, { size, active })))
+
+      const registerSidebarPage = () => ctx.slots.inject('main', () => ctx.slots.register({
+        name: 'main', key: PKG, locale: NS,
+      }, () => jsx(Page, { t: tr })))
+
+      const placements = {
+        settingsEntry: [registerSettings, registerSettingsIcon],
+        sidebarEntry: [registerSidebar, registerSidebarPage],
+      }
+
+      const applyNow = preferences => {
+        for (const [key, registrars] of Object.entries(placements)) {
+          const wanted = preferences?.[key] !== false
+          const current = entries[key]
+          if (wanted && !current) {
+            // The registrar returns a disposer through ctx.slots.inject; the
+            // effect wrapper gives us the same handle here.
+            entries[key] = { dispose: registrars.map(registrar => ctx.effect(registrar, `conversation-sync/${key}`)) }
+          } else if (!wanted && current) {
+            for (const dispose of current.dispose) { try { dispose?.() } catch { /* already gone */ } }
+            entries[key] = null
+          }
+        }
+      }
+
+      // Page calls this after a toggle, so the change is visible at once.
+      applyPlacement = applyNow
+
+      ctx.effect(() => {
+        // Read the stored preferences before registering anything: registering
+        // first and then removing would flash an entry the user turned off.
+        rpc('preferences')
+          .then(result => applyNow(result?.preferences))
+          .catch(() => applyNow(undefined))
+        return () => {
+          for (const entry of Object.values(entries)) {
+            for (const dispose of entry?.dispose ?? []) { try { dispose?.() } catch { /* already gone */ } }
+          }
+          entries.settingsEntry = null
+          entries.sidebarEntry = null
+          applyPlacement = () => {}
+        }
+      }, 'conversation-sync/placements')
     }
 
     return { apply, inject }

@@ -1,5 +1,6 @@
 import os from 'node:os'
 import path from 'node:path'
+import fs from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import Schema from '@deepseek-ai/schemastery'
@@ -10,8 +11,9 @@ import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
 import { createHostKeyGuard } from './lib/hostkey.js'
 import { scanMachine } from './lib/discovery.js'
-import { listDshSessions, readDshSessionMessages, dshSessionExists } from './lib/dsh-sessions.js'
-import { SyncRollback, diagnoseFailure } from './lib/rollback.js'
+import { listDshSessions, readDshSessionMessages, dshSessionExists, countDshEvents, inspectDshLog } from './lib/dsh-sessions.js'
+import { SyncRollback, diagnoseFailure, preflight } from './lib/rollback.js'
+import { migrateIntoSyncWorkspace } from './lib/dsh-migrate.js'
 
 export const name = 'dsh-conversation-sync'
 export const inject = ['timer', 'connection', 'credentials', 'sessionPersistence', 'sessionProjectionCache', 'workspaceRegistry', 'sessions', 'storageDomain']
@@ -89,6 +91,34 @@ const domain = {
 
 function safeId(value) {
   return String(value).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'unknown'
+}
+
+// UI placement preferences. Deliberately a plain JSON file rather than another
+// storage table: the domain schema is versioned, and adding a table would make
+// every existing install run a migration for two booleans.
+const PREFERENCES_FILE = path.join(ROOT, 'preferences.json')
+const DEFAULT_PREFERENCES = { sidebarEntry: true, settingsEntry: true }
+
+async function readPreferences() {
+  try {
+    const text = await fs.readFile(PREFERENCES_FILE, 'utf8')
+    const parsed = JSON.parse(text)
+    return {
+      sidebarEntry: parsed?.sidebarEntry !== false,
+      settingsEntry: parsed?.settingsEntry !== false,
+    }
+  } catch {
+    // A missing or corrupt preferences file must not break the panel.
+    return { ...DEFAULT_PREFERENCES }
+  }
+}
+
+async function writePreferences(next) {
+  await fs.mkdir(ROOT, { recursive: true })
+  const temporary = `${PREFERENCES_FILE}.${process.pid}.tmp`
+  await fs.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+  await fs.rename(temporary, PREFERENCES_FILE)
+  return next
 }
 
 /** Plugin config: DSH merges these from the profile patch / config editor. */
@@ -245,16 +275,23 @@ export async function apply(ctx, config = {}) {
 
   /** Append events to an existing imported session (live first, persistence second). */
   const appendSession = async (sessionId, records, startSeq) => {
-    const events = buildEvents(records, { startSeq, createId: randomUUID })
-    if (!events.length) return startSeq
+    if (!records.length) return startSeq
     const live = sessionStore.get(sessionId)
     if (live) {
-      live.append(events.map(toLiveInput))
+      // A resident session already knows its log, so the next turn comes from it.
+      const { nextTurn } = await inspectDshLog({ persistence, sessions: sessionStore, sessionId })
+      const liveEvents = buildEvents(records, { startSeq, startTurn: nextTurn, createId: randomUUID })
+      live.append(liveEvents.map(toLiveInput))
       await sessionStore.flush(live)
-      return startSeq + events.length
+      return startSeq + liveEvents.length
     }
-    const stat = await persistence.stat(sessionId)
-    const seq = stat?.eventCount ?? startSeq
+    // Derive the current length AND the next turn from the LOG, not from
+    // stat().eventCount: the backend may report 0 for a session created in this
+    // same run, and both a wrong seq ("append seq mismatch ... expected N") and a
+    // reused turn ("turn/start does not open the expected turn") are rejected.
+    const { eventCount: seq, nextTurn } = await inspectDshLog({ persistence, sessions: sessionStore, sessionId })
+    const events = buildEvents(records, { startSeq, startTurn: nextTurn, createId: randomUUID })
+    if (!events.length) return seq
     const shift = seq - startSeq
     const ready = events.map((event, index) => ({
       ...event,
@@ -272,12 +309,7 @@ export async function apply(ctx, config = {}) {
   }
 
   const dshFacade = {
-    getSeq: async sessionId => {
-      const live = sessionStore.get(sessionId)
-      if (live) return live.log?.length ?? 0
-      const stat = await persistence.stat(sessionId)
-      return stat?.eventCount ?? 0
-    },
+    getSeq: async sessionId => countDshEvents({ persistence, sessions: sessionStore, sessionId }),
     // DSH has no public truncate API for third-party plugins. Restore of the
     // DSH side is therefore reported for manual cleanup instead of editing
     // persistence files directly (which would risk corrupting the log).
@@ -388,14 +420,19 @@ export async function apply(ctx, config = {}) {
       }
       written += messages.length
     }
-    if (!content) return 0
+    if (!content) return { written: 0 }
     const statBefore = await transport.stat(binding.externalPath)
     if (!statBefore) await transport.mkdir(dirOf(machine, binding.externalPath))
-    await transport.write(binding.externalPath, (statBefore ? await transport.read(binding.externalPath) : Buffer.alloc(0)).toString('utf8') + content)
+    const previous = statBefore ? (await transport.read(binding.externalPath)).toString('utf8') : ''
+    const next = previous + content
+    await transport.write(binding.externalPath, next)
     const stat = await transport.stat(binding.externalPath)
     state.externalSize = stat?.size
     state.externalMtimeMs = stat?.mtimeMs
-    return written
+    // Handed to verify(): the exact bytes the file must now end with, and its
+    // size. A write that silently truncated or landed in the wrong file shows
+    // up here instead of in the user's source file later.
+    return { written, content, expectedSize: Buffer.byteLength(next, 'utf8') }
   }
 
   const syncBinding = async (binding, forced = false, directionOverride) => {
@@ -419,7 +456,31 @@ export async function apply(ctx, config = {}) {
       // Pooled: syncing the same machine again (the common case, every poll)
       // must not pay for another SSH handshake.
       transport = await pooledTransport(machine, binding.keyRef)
-      rollback = new SyncRollback({ logger })
+
+      // PRE-FLIGHT: read-only. A sync whose preconditions are already broken
+      // must mutate nothing, so this runs before any backup or write.
+      const ready = await preflight({
+        direction,
+        binding,
+        transport,
+        machine: machine ?? { id: binding.machineId, kind: 'local' },
+        persistence,
+        sessions: sessionStore,
+        dshSessionId: binding.dshSessionIds[0],
+        dataRoot: ROOT,
+      })
+      if (!ready.ok) {
+        const failure = { ...ready.failure, conditions: ready.failure.conditions, checks: ready.checks }
+        state.lastError = failure.reason
+        state.lastFailure = failure
+        await saveState(state)
+        logger.warn?.(`[conversation-sync] ${binding.name}: ${failure.reason}`)
+        return { id: binding.id, error: failure.reason, failure, direction }
+      }
+
+      rollback = new SyncRollback({ logger, dshHome: DSH_HOME })
+      // BACKUP: the external file and the DSH session directory, both verified
+      // readable before the first byte is written.
       snapshot = await rollback.begin({
         bindingId: binding.id,
         direction,
@@ -432,8 +493,51 @@ export async function apply(ctx, config = {}) {
 
       let imported = 0
       let written = 0
+      let outResult
+      const sessionIdBefore = binding.dshSessionIds[0]
+      const seqBefore = sessionIdBefore ? await dshFacade.getSeq(sessionIdBefore) : 0
       if (direction === 'in' || direction === 'both') imported = await syncIn(binding, state, transport)
-      if (direction === 'out' || direction === 'both') written = await syncOut(binding, state, transport, machine ?? { kind: 'local' })
+      if (direction === 'out' || direction === 'both') {
+        outResult = await syncOut(binding, state, transport, machine ?? { kind: 'local' })
+        written = outResult.written
+      }
+
+      // VERIFY: read both sides back. A write that did not land as reported is
+      // a failure - the user would otherwise see "synced" and no new messages.
+      const expected = {}
+      if (outResult?.expectedSize !== undefined) expected.externalBytes = outResult.expectedSize
+      if ((direction === 'in' || direction === 'both') && imported > 0) {
+        // Read the messages back the way the export path does. `getSeq` is not
+        // usable here: right after persistence.create() the backend's stat()
+        // still reports zero events for the new session, so a seq comparison
+        // fails a sync that actually worked (it did, in testing). What the user
+        // cares about is whether the conversation is readable, so assert that.
+        const targetId = binding.dshSessionIds[0]
+        const messages = targetId
+          ? await readDshSessionMessages({ persistence, sessions: sessionStore, sessionId: targetId, fromSeq: 0, strict: true })
+          : []
+        if (!messages.length) {
+          const error = new Error(`the DSH session has no readable messages after importing ${imported} record(s)`)
+          error.phase = 'verify'
+          throw error
+        }
+        if (sessionIdBefore && seqBefore > 0) {
+          const seqAfter = await dshFacade.getSeq(targetId)
+          if (Number(seqAfter) <= seqBefore) {
+            const error = new Error(`the DSH session did not grow (${seqBefore} -> ${seqAfter} events) after importing ${imported} record(s)`)
+            error.phase = 'verify'
+            throw error
+          }
+        }
+      }
+      await rollback.verify(snapshot, {
+        direction,
+        transport,
+        externalPath: binding.externalPath,
+        expected,
+        dshFacade,
+        dshSessionId: binding.dshSessionIds[0],
+      })
 
       await rollback.succeed(snapshot)
       state.lastSyncAt = Date.now()
@@ -446,9 +550,10 @@ export async function apply(ctx, config = {}) {
       const outcome = rollback
         ? await rollback.fail(snapshot, error, context, { externalTransport: transport })
         : { failure: diagnoseFailure(error, context), report: undefined }
+      const backupPaths = [snapshot?.external?.backupPath, snapshot?.dsh?.backupPath].filter(Boolean)
       const failure = {
         ...outcome.failure,
-        backupPaths: snapshot?.external?.backupPath ? [snapshot.external.backupPath] : [],
+        backupPaths,
         restored: outcome.report?.restored,
         cleanup: outcome.report?.errors ?? [],
       }
@@ -559,6 +664,42 @@ export async function apply(ctx, config = {}) {
     bindingsTable = storage.table('bindings')
     statesTable = storage.table('states')
     await refreshMachines()
+    // Sessions imported by versions that made one workspace per machine live
+    // under those old directories. Move them into the single sync workspace so
+    // the user's storage is one folder, as asked - and so the old workspaces can
+    // be emptied. Runs before the first scan, is idempotent, and never throws.
+    try {
+      const migration = await migrateIntoSyncWorkspace({
+        dshHome: DSH_HOME,
+        ownedRoot: WORKSPACE_ROOT,
+        syncDir: SYNC_WORKSPACE_DIR,
+        logger,
+      })
+      if (migration.moved.length) {
+        logger.info?.(`[conversation-sync] moved ${migration.moved.length} imported session(s) into ${SYNC_WORKSPACE_DIR}`)
+        // Moving the files is not enough: a session only appears in a workspace
+        // whose record lists it, so an un-attached migration would leave the
+        // session on disk and invisible in the UI. Attach each one now.
+        try {
+          await localTransport.mkdir(SYNC_WORKSPACE_DIR)
+          const ws = await workspaces.create(SYNC_WORKSPACE_DIR, SYNC_WORKSPACE_TITLE)
+          for (const item of migration.moved) {
+            try {
+              await ws.attachSession(item.sessionId)
+            } catch (error) {
+              logger.warn?.(`[conversation-sync] could not attach migrated session ${item.sessionId}: ${String(error?.message ?? error)}`)
+            }
+          }
+        } catch (error) {
+          logger.warn?.(`[conversation-sync] could not register the sync workspace: ${String(error?.message ?? error)}`)
+        }
+      }
+      for (const failure of migration.errors) {
+        logger.warn?.(`[conversation-sync] could not move session ${failure.sessionId}: ${failure.error}`)
+      }
+    } catch (error) {
+      logger.warn?.(`[conversation-sync] session migration failed: ${String(error?.message ?? error)}`)
+    }
     void scanExternal(true)
     return () => {
       // Pooled SSH connections outlive the request that opened them, so they
@@ -630,6 +771,19 @@ export async function apply(ctx, config = {}) {
 
       case 'bindings':
         return Response.json({ bindings: allBindings(), states: [...statesTable.entries()].map(([, value]) => value) })
+
+      case 'preferences':
+        return Response.json({ preferences: await readPreferences() })
+
+      case 'setPreferences': {
+        const current = await readPreferences()
+        const next = {
+          sidebarEntry: body.sidebarEntry === undefined ? current.sidebarEntry : body.sidebarEntry !== false,
+          settingsEntry: body.settingsEntry === undefined ? current.settingsEntry : body.settingsEntry !== false,
+        }
+        await writePreferences(next)
+        return Response.json({ preferences: next })
+      }
 
       case 'setKey': {
         const machineId = String(body.machineId ?? '')

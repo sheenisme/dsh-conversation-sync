@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { listDshSessions, readDshSessionMessages, dshSessionExists } from '../lib/dsh-sessions.js'
+import { listDshSessions, readDshSessionMessages, dshSessionExists, inspectDshLog, countDshEvents } from '../lib/dsh-sessions.js'
 
 /** Minimal in-memory persistence/session facade for one or more logs. */
 function facade(logs, { failStat = false, failOpen = false, title } = {}) {
@@ -35,6 +35,42 @@ function facade(logs, { failStat = false, failOpen = false, title } = {}) {
 
 const userMessage = (seq, text) => ({ seq, time: seq, type: 'user/message', data: { id: `u${seq}`, role: 'user', content: [{ type: 'text', text }] } })
 const assistantMessage = (seq, text) => ({ seq, time: seq, type: 'assistant/message', data: { message: { id: `a${seq}`, role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model' } } } })
+
+test('inspectDshLog(): the next turn comes from data.turn, not the envelope', async () => {
+  // A real log stores the turn inside `data`. Reading it off the envelope made
+  // every append restart at turn 1, which the backend refuses with
+  // "turn/start does not open the expected turn".
+  const log = [
+    { seq: 0, time: 1, type: 'turn/start', data: { turn: 1 } },
+    { seq: 1, time: 1, type: 'step/start', data: { turn: 1, step: 1 } },
+    { seq: 2, time: 2, type: 'turn/end', data: { turn: 1 } },
+    { seq: 3, time: 3, type: 'turn/start', data: { turn: 2 } },
+    { seq: 4, time: 3, type: 'step/start', data: { turn: 2, step: 1 } },
+    { seq: 5, time: 4, type: 'turn/end', data: { turn: 2 } },
+  ]
+  const { persistence, sessions } = facade({ s1: log })
+  const info = await inspectDshLog({ persistence, sessions, sessionId: 's1' })
+  assert.equal(info.eventCount, 6)
+  assert.equal(info.nextTurn, 3, 'the append must continue after the highest stored turn')
+})
+
+test('inspectDshLog(): an empty or turn-less log starts at turn 1', async () => {
+  const { persistence, sessions } = facade({ empty: [], noturn: [{ seq: 0, type: 'session/title', data: {} }] })
+  assert.deepEqual(await inspectDshLog({ persistence, sessions, sessionId: 'empty' }), { eventCount: 0, nextTurn: 1 })
+  assert.equal((await inspectDshLog({ persistence, sessions, sessionId: 'noturn' })).nextTurn, 1)
+})
+
+test('inspectDshLog(): a live session is read without opening a handle', async () => {
+  const live = { log: [{ seq: 0, type: 'turn/start', data: { turn: 7 } }] }
+  const info = await inspectDshLog({ persistence: {}, sessions: { get: () => live }, sessionId: 'x' })
+  assert.deepEqual(info, { eventCount: 1, nextTurn: 8 })
+})
+
+test('countDshEvents(): reads the whole log, page by page', async () => {
+  const log = Array.from({ length: 2500 }, (_, index) => ({ seq: index, type: 'user/message', data: {} }))
+  const { persistence, sessions } = facade({ big: log })
+  assert.equal(await countDshEvents({ persistence, sessions, sessionId: 'big' }), 2500)
+})
 
 test('listDshSessions(): count is messages, not raw events', async () => {
   const events = [

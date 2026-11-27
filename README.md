@@ -17,8 +17,10 @@ over SSH.
 
 ## UI at a glance
 
-The panel opens from **Settings → Conversation sync** (its own sidebar entry) or
-from **Plugins → Conversation sync**. It is a two-column picker:
+The panel opens from **Settings → Conversation sync**, from the **sidebar icon**,
+or from **Plugins → Conversation sync**. Both entries are on by default and each
+has its own switch on the page (`Show this page in: ☑ left sidebar ☑ Settings`),
+so you can keep only the one you use. It is a two-column picker:
 
 - **Left:** every DSH session in this installation.
 - **Right:** sessions found on the selected machine. Switch machines with the
@@ -54,6 +56,10 @@ profile manifest has to be edited by hand.
    because DSH requires a session's working directory to equal its workspace
    path — a per-machine folder would have to be its own workspace.
 
+   Sessions imported by an older build that *did* make one workspace per machine
+   are moved into `会话同步` on the next start, header included, so the storage
+   ends up as one folder either way.
+
 ## Supported sources
 
 | Kind | Typical location |
@@ -74,6 +80,28 @@ refusing.
 
 Per-format parsing details, quirks and filtering rules are in
 [docs/DETAIL.md](docs/DETAIL.md#supported-sources).
+
+## Before and after every sync
+
+Both directions go through the same three steps, so a sync either lands
+completely or not at all:
+
+1. **Pre-flight (read-only).** The plugin's data directory must be writable, the
+   source must be readable, the target DSH session must exist, and the direction
+   must be known. If any check fails the sync is refused *before* anything is
+   touched, and the reason names the check that failed.
+2. **Backup.** The external file is copied into
+   `~/.dsh/conversation-sync/backups/<binding>/`, and the DSH session's whole
+   on-disk directory is copied aside. Both copies are read back before the first
+   write — a backup that cannot be read is not a backup, so the sync aborts.
+3. **Verify, then roll back on failure.** After writing, both sides are read
+   again: the exported file must really end with the bytes that were written, and
+   an imported session must really contain readable messages. A mismatch is a
+   failure, and the previous state is restored from the backups.
+
+The DSH side is restored at file level (the session directory is copied back, or
+removed entirely when the sync created it), because `SessionPersistence` has no
+delete or truncate API — editing a live log through it would risk corruption.
 
 ## When a sync fails
 
@@ -100,11 +128,12 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-131 unit tests cover the pure modules — adapters, event building, `.ssh/config`
-parsing, discovery, rollback diagnostics, host keys, SQLite reads, jump-chain
-planning, the connection pool, the system-ssh transport, and the browser half
-through a stub module loader. CI additionally installs the packed plugin into five real DSH releases
-and drives the actual RPC surface.
+149 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+parsing, discovery, rollback diagnostics and file-level session restore, host
+keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
+transport, the one-folder migration, and the browser half through a stub module
+loader. CI additionally installs the packed plugin into five real DSH releases
+and drives the actual RPC surface through eleven scenarios.
 
 See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job proves and how
 to run the harness locally.

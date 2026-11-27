@@ -1,4 +1,7 @@
 import test from 'node:test'
+import os from 'node:os'
+import path from 'node:path'
+import fs from 'node:fs/promises'
 import assert from 'node:assert/strict'
 import { SyncRollback, diagnoseFailure } from '../lib/rollback.js'
 import { memoryTransport } from './helpers.js'
@@ -63,17 +66,45 @@ test('SyncRollback.fail(): backup failure aborts begin before any write', async 
   )
 })
 
-test('SyncRollback.fail(): DSH restore requires truncateFrom, else manual-cleanup report', async () => {
-  const rb = new SyncRollback()
+test('SyncRollback.fail(): a session created by the failed sync is removed', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cs-rollback-'))
+  const sessionId = 'conversation-created'
+  const dir = path.join(home, 'sessions', '--slug--', sessionId)
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, 'session.v4.jsonl'), '{}\n')
+
+  const rb = new SyncRollback({ dshHome: home })
   const snap = {
     id: 'rb-x', direction: 'in', status: 'pending',
-    dsh: { sessionId: 's1', fromSeq: 7, appendedCount: 3 },
+    dsh: { sessionId, fromSeq: 0, existed: false },
   }
   const { report } = await rb.fail(snap, new Error('boom'), {}, {
-    dshFacade: { getSeq: async () => 7 },
+    dshFacade: { getSeq: async () => 0 },
   })
-  assert.equal(report.restored.dsh, false)
-  assert.ok(report.errors.some(e => /remove them manually via the DSH UI/.test(e)))
+  assert.equal(report.restored.dsh, true)
+  assert.equal(report.errors.length, 0)
+  await assert.rejects(fs.stat(dir), /ENOENT/)
+  await fs.rm(home, { recursive: true, force: true })
+})
+
+test('SyncRollback.fail(): a session that existed is restored from its directory backup', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cs-rollback-'))
+  const backupRoot = path.join(home, 'backups')
+  const sessionId = 'conversation-existing'
+  const dir = path.join(home, 'sessions', '--slug--', sessionId)
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, 'session.v4.jsonl'), 'original\n')
+
+  const rb = new SyncRollback({ dshHome: home })
+  const snap = await rb.begin({ bindingId: 'b5', direction: 'in', dshSessionId: sessionId, backupRoot, dshFacade: { getSeq: async () => 3 } })
+  assert.ok(snap.dsh.existed, 'the session directory must be backed up before the append')
+  // Simulate a sync that appended and then failed.
+  await fs.writeFile(path.join(dir, 'session.v4.jsonl'), 'original\nappended\n')
+
+  const { report } = await rb.fail(snap, new Error('boom'), {}, { dshFacade: { getSeq: async () => 9 } })
+  assert.equal(report.restored.dsh, true)
+  assert.equal(await fs.readFile(path.join(dir, 'session.v4.jsonl'), 'utf8'), 'original\n')
+  await fs.rm(home, { recursive: true, force: true })
 })
 
 test('diagnoseFailure: a mkdir failure names the plugin data directory, not the conversation file', () => {

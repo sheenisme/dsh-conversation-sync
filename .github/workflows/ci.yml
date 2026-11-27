@@ -208,6 +208,20 @@ jobs:
           node scripts/ci/scenario.mjs --scenario ssh \
             --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
             --home "$RUNNER_TEMP/home-ssh" --port 5408 --fixtures "$PWD/test/fixtures"
+      # The guarantees that are invisible to a unit test: the pre-flight runs
+      # inside a live sync, a failed write must leave the source untouched with a
+      # backup on disk, an append must continue the session's turns, and both
+      # entry switches must default on and toggle independently.
+      - name: Scenario "safety" (pre-flight, backup, append, both directions)
+        run: |
+          node scripts/ci/scenario.mjs --scenario safety \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-safety" --port 5410 --fixtures "$PWD/test/fixtures"
+      - name: Scenario "placements" (the two entry switches)
+        run: |
+          node scripts/ci/scenario.mjs --scenario placements \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-placements" --port 5411 --fixtures "$PWD/test/fixtures"
       - name: Upload harness logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

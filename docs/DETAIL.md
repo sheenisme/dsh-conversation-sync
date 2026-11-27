@@ -244,7 +244,7 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 131 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 149 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -266,7 +266,7 @@ that unit fixtures cannot:
 | `install-dsh.mjs` | installs one DSH version so it can actually run under plain Node — it reads `@deepseek-ai/dsh-app-boot`'s peer ranges from the registry, because npm does not install the peers of a transitive package |
 | `harness.mjs` | shared profile bootstrap, health-line wait, activation check and auth-cookie handshake |
 | `boot-check.mjs` | "does this DSH version support the plugin": install, boot, import, read back |
-| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `empty`, `reimport`, `direction`, `keys`, `ssh` — the user journey over the real RPC surface |
+| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `empty`, `reimport`, `direction`, `keys`, `ssh`, `safety`, `placements` — the user journey over the real RPC surface |
 
 `.github/workflows/ci.yml` runs three jobs:
 
@@ -335,3 +335,48 @@ that no dead binding was left in the list.
 The `direction` scenario exists specifically for the `syncAll` and cursor
 defects. It syncs a binding stored as `in` with an explicit `out` and asserts the
 file received content; that is the only level at which the bug is observable.
+
+## Pre-flight, backup and verification
+
+Three guarantees run around every sync, in both directions, and all three are
+exercised by the `safety` scenario because none of them is visible to a unit
+test:
+
+1. `preflight()` in `lib/rollback.js` is read-only and runs before anything is
+   written. It checks the plugin data directory (`data-root`), that the source is
+   readable (`source-read`), that the target DSH session exists (`dsh-session`)
+   and that the direction is known. A refusal returns the same
+   `{reason, conditions}` shape as a real failure plus `preflight: true` and the
+   id of the check that failed, so the panel can say *which* precondition is
+   wrong instead of "sync failed".
+2. `SyncRollback.begin()` copies the external file **and** the DSH session's
+   whole directory, then reads both back. A backup whose byte count disagrees
+   with the original aborts the sync before the first write — a backup you cannot
+   restore from is worse than no backup, because it looks like safety.
+3. `SyncRollback.verify()` re-reads both sides after the write. The exported file
+   must end with exactly the bytes that were written, and an imported session
+   must contain readable messages. Anything else raises with `phase: 'verify'`
+   and the caller rolls back.
+
+The DSH side is restored at file level because `SessionPersistence` exposes no
+delete or truncate operation. `lib/dsh-store.js` therefore copies the session
+directory (`backupSessionDir`), copies it back (`restoreSessionDir`), or removes
+it when the sync created the session (`removeSessionDir`). Session logs are
+multi-frame zstd, so every reader here splits frames on the `28 b5 2f fd` magic —
+decompressing the whole file returns only the header frame.
+
+`lib/dsh-migrate.js` uses the same frame handling to move sessions that older
+builds imported into per-machine workspaces: it copies the directory, rewrites
+the `cwd` in frame one (leaving every event frame byte-identical), removes the
+original, and the caller attaches the session to the single `会话同步`
+workspace. Moving the files alone is not enough — a session appears in a
+workspace only if that workspace's record lists it, which is how a migrated
+session can sit on disk and be invisible in the UI.
+
+Two append bugs are pinned by unit tests rather than by a scenario, because both
+are visible in the event stream: `persistence.stat().eventCount` reports `0` for
+a session created in the same process, so `appendSession` derives the current
+length from the log (`inspectDshLog`), and the next turn number comes from
+`data.turn` (not the envelope) so an append never restarts at turn 1 — the
+backend rejects both with `append seq mismatch` and `turn/start does not open the
+expected turn`.
