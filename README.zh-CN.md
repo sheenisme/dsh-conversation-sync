@@ -73,12 +73,30 @@ OpenCode 与 DeepSeek 导出**只能导入** —— OpenCode 的会话存在活�
 npm test        # 单元测试，node:test，无需网络也无需 DSH
 ```
 
-126 个单元测试覆盖纯模块 —— 各格式适配器、事件构造、`.ssh/config` 解析、会话扫描、
+136 个单元测试覆盖纯模块 —— 各格式适配器、事件构造、`.ssh/config` 解析、会话扫描、
 回退诊断、主机密钥、SQLite 读取、跳板链规划、连接池与系统 ssh 传输层，并通过桩模块加载器覆盖浏览器端代码。
 CI 还会把打好的插件装进五个真实 DSH 版本，并驱动真实的 RPC 接口。
 
 每个 CI 任务证明什么、如何在本地跑 harness，见
 [docs/DETAIL.md](docs/DETAIL.md#testing)（英文）。
+
+## 保存私钥路径后 DSH 起不来怎么办
+
+早期版本（1.0.5 及更早）用机器 id 命名保存的私钥，生成了
+`conversation-sync/ssh-key/ssh:prod` 这样的凭据引用。DSH 的凭据存储只接受
+POSIX 标识符，并且**在加载时校验整个文件**，因此这一行会让 DSH 完全无法启动
+——而插件自己也修不了它，因为插件根本没机会运行。
+
+如果你装的是那样的版本，请在启动 DSH 之前，从终端运行 profile 里的修复脚本：
+
+```bash
+node ~/.dsh/profiles/*/node_modules/dsh-conversation-sync/scripts/fix-credentials.mjs        # 只报告
+node ~/.dsh/profiles/*/node_modules/dsh-conversation-sync/scripts/fix-credentials.mjs --write # 实际修复
+```
+
+它只重命名不合规的键，保留所有值，留一份 `.bak-` 备份，不动文件里的其他内容。
+从 1.0.6 起这种情况不可能再发生：名字按 `conversation_sync_ssh_key_<slug>_<digest>`
+生成，并且在写入之前就被拒绝。
 
 ## 许可证
 

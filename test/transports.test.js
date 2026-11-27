@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { planJumpChain, LocalTransport, SshTransport, transportForMachine } from '../lib/transports.js'
+import { planJumpChain, LocalTransport, SshTransport, transportForMachine, keyRefFor, isValidKeyRef } from '../lib/transports.js'
 
 const hop = (name, port = 22) => ({ host: name, port, username: name, privateKeyPath: `/keys/${name}` })
 
@@ -169,7 +169,7 @@ test('transportForMachine: a jump host also falls back to its own IdentityFile',
       { id: 'ssh:target', kind: 'ssh', hostname: 'target', user: 't', via: ['ssh:bastion'] },
     ]
     const transport = await transportForMachine(machines[1], machines, {
-      resolve: async ref => (ref.endsWith('ssh:target') ? { value: targetKey } : undefined),
+      resolve: async ref => (ref === keyRefFor('ssh:target') ? { value: targetKey } : undefined),
     })
     assert.equal(transport.via[0].privateKeyPath, '/keys/bastion')
     assert.equal(transport.privateKeyPath, targetKey)
@@ -197,17 +197,18 @@ test('transportForMachine: each hop resolves its own key and the chain order is 
     // Every credential resolves to a real file, otherwise the stale-path
     // fallback would (correctly) take over.
     const write = async name => { const file = path.join(dir, name); await fs.writeFile(file, 'PRIVATE'); return file }
-    const keys = {
+    const byId = {
       'ssh:outer': await write('outer'),
       'ssh:inner': await write('inner'),
       'ssh:target': await write('target'),
     }
+    // The store is addressed by credential reference, not by machine id.
+    const keys = Object.fromEntries(Object.entries(byId).map(([id, file]) => [keyRefFor(id), file]))
     const asked = []
     const credentials = {
       resolve: async ref => {
         asked.push(ref)
-        const id = ref.split('/').pop()
-        return keys[id] ? { value: keys[id] } : undefined
+        return keys[ref] ? { value: keys[ref] } : undefined
       },
     }
     const machines = [
@@ -218,8 +219,8 @@ test('transportForMachine: each hop resolves its own key and the chain order is 
     const transport = await transportForMachine(machines[2], machines, credentials)
     assert.equal(transport.via.length, 2)
     assert.deepEqual(transport.via.map(step => step.host), ['outer.example', 'inner.example'])
-    assert.deepEqual(transport.via.map(step => step.privateKeyPath), [keys['ssh:outer'], keys['ssh:inner']])
-    assert.equal(transport.privateKeyPath, keys['ssh:target'])
+    assert.deepEqual(transport.via.map(step => step.privateKeyPath), [byId['ssh:outer'], byId['ssh:inner']])
+    assert.equal(transport.privateKeyPath, byId['ssh:target'])
     // the target's key is never reused for a hop
     assert.equal(new Set(asked).size, 3)
   } finally {
@@ -297,5 +298,71 @@ test('SshTransport._keyMaterial(): .pub uses ssh-agent, a private key is read fr
   } finally {
     if (previous === undefined) delete process.env.SSH_AUTH_SOCK
     else process.env.SSH_AUTH_SOCK = previous
+  }
+})
+
+// A credential reference name is brand-checked by the credentials provider, and
+// the local provider validates its whole file when it loads. Naming a credential
+// after a machine id put `conversation-sync/ssh-key/ssh:BAAI-Ascend` into
+// ~/.dsh/.credentials.yaml, which made DSH fail to start on the next launch.
+const REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+test('keyRefFor(): every machine id yields a name the credential store accepts', () => {
+  const ids = [
+    'ssh:BAAI-Ascend',
+    'ssh:prod-app',
+    'local',
+    'ssh:host.with.dots',
+    'ssh:名前',
+    'ssh::',
+    '',
+    'ssh:host with space',
+  ]
+  for (const id of ids) {
+    const ref = keyRefFor(id)
+    assert.match(ref, REF_PATTERN, `keyRefFor(${JSON.stringify(id)}) produced ${JSON.stringify(ref)}`)
+    assert.equal(isValidKeyRef(ref), true)
+  }
+})
+
+test('keyRefFor(): ids that normalise alike still get different names', () => {
+  // Without the digest these two would both become ..._ssh_host_with_space.
+  assert.notEqual(keyRefFor('ssh:host with space'), keyRefFor('ssh:host_with_space'))
+  assert.notEqual(keyRefFor('ssh:A-B'), keyRefFor('ssh:A_B'))
+})
+
+test('keyRefFor(): the same id always produces the same name', () => {
+  assert.equal(keyRefFor('ssh:BAAI-Ascend'), keyRefFor('ssh:BAAI-Ascend'))
+})
+
+test('isValidKeyRef(): rejects the names that used to crash the app', () => {
+  for (const bad of ['conversation-sync/ssh-key/ssh:BAAI-Ascend', 'a-b', '1abc', '', undefined, null, 'a b']) {
+    assert.equal(isValidKeyRef(bad), false, `${JSON.stringify(bad)} should be rejected`)
+  }
+  for (const good of ['conversation_sync_ssh_key_ssh_BAAI_Ascend_1a2b3c4d', '_x', 'A1']) {
+    assert.equal(isValidKeyRef(good), true, `${good} should be accepted`)
+  }
+})
+
+test('transportForMachine(): an out-of-grammar keyRef cannot crash the machine', async () => {
+  // A stale ref from an older build must read as "nothing saved", not throw.
+  const credentials = {
+    resolve: async ref => {
+      assert.match(ref, REF_PATTERN, 'the store must never see an invalid name')
+      return undefined
+    },
+  }
+  const machine = { id: 'ssh:box', kind: 'ssh', hostname: 'box', label: 'box' }
+  // Point the default-key fallback at an empty directory so the failure does not
+  // depend on whether the machine running the tests has ~/.ssh/id_ed25519 —
+  // resolution must fail with the actionable "no key" message, not a TypeError.
+  const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-nokeys-'))
+  try {
+    await assert.rejects(
+      () => transportForMachine(machine, [machine], credentials, undefined, undefined, { defaultKeyDir: empty }),
+      /no SSH private key for 'box'/,
+    )
+  } finally {
+    await fs.rm(empty, { recursive: true, force: true })
   }
 })

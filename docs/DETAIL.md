@@ -205,9 +205,40 @@ component's session log).
   `sessions`, `bindings`, `setKey`, `pair`, `unbind`, `sync`. It is owner-only,
   as all DSH web routes are.
 
+## Why credential names are generated, not derived
+
+A saved SSH key path lives in DSH's credential store, addressed by a reference
+name. That store enforces `REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/` and
+validates the entire YAML file when it loads — a name outside the grammar is a
+`TypeError` at startup, not a warning.
+
+Machine ids are not identifiers: `ssh:BAAI-Ascend` carries a colon and a dash.
+An earlier build built the reference by concatenation,
+`conversation-sync/ssh-key/${machine.id}`, so saving a key path wrote
+`conversation-sync/ssh-key/ssh:BAAI-Ascend` into `~/.dsh/.credentials.yaml` and
+DSH could not start again. The plugin could not repair it either: it never got
+to run.
+
+The reference is now generated:
+
+```js
+keyRefFor('ssh:BAAI-Ascend') // conversation_sync_ssh_key_ssh_BAAI_Ascend_1e701114
+```
+
+Every character outside the grammar becomes `_`, and a truncated SHA-1 of the
+original id keeps two ids that normalise alike (`ssh:A-B` vs `ssh:A_B`) from
+sharing one credential. `isValidKeyRef()` guards every read and write, so an
+out-of-grammar name is treated as "nothing saved" rather than thrown.
+
+For stores already poisoned by an older build, `scripts/fix-credentials.mjs`
+runs outside DSH, renames only the invalid keys in the `refs:` section, keeps
+every value, and writes a `.bak-` copy. `test/fix-credentials.test.js` and the
+`keys` CI scenario both pin this; the scenario asserts on the YAML file, because
+a unit test cannot catch a name that only fails on the next process launch.
+
 ## Testing
 
-`npm test` runs 126 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 136 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`

@@ -198,8 +198,33 @@ const scenarios = {
     assert(byId['ssh:db']?.via?.includes('ssh:bastion'), 'the jump host was not linked to the target')
     assert(keys['ssh:prod']?.endsWith('prod_ed25519'), `prod should use its IdentityFile, got ${keys['ssh:prod']}`)
     assert(keys['ssh:bastion']?.endsWith('id_ed25519'), `bastion should fall back to the default key, got ${keys['ssh:bastion']}`)
-    log(`keys ok: prod -> ${keys['ssh:prod']}, bastion -> ${keys['ssh:bastion']}`)
-    return { prod: keys['ssh:prod'], bastion: keys['ssh:bastion'] }
+
+    // Saving a key used to write `conversation-sync/ssh-key/ssh:prod` into the
+    // credential store. The store brand-checks names and validates the whole
+    // file when it loads, so that write did not fail here — it failed the NEXT
+    // launch of DSH, with the plugin unable to run and therefore unable to
+    // repair anything. Assert on the file itself, not just on the call.
+    const saved = await rpc({ action: 'setKey', machineId: 'ssh:prod', path: path.join(sshDir, 'prod_ed25519') })
+    assert(saved.ok, `setKey failed: ${JSON.stringify(saved)}`)
+    assert(/^[A-Za-z_][A-Za-z0-9_]*$/.test(saved.ref), `invalid credential name written: ${saved.ref}`)
+    const store = await fs.readFile(path.join(args.home, '.credentials.yaml'), 'utf8')
+    assert(!store.includes('conversation-sync/ssh-key'), 'the store still holds the invalid reference scheme')
+    // Only `refs:` holds references. `records:` is addressed as `<scope>/<id>`,
+    // where a slash is legal — checking those would reject valid entries.
+    let section = ''
+    for (const line of store.split('\n')) {
+      const top = /^([A-Za-z_][A-Za-z0-9_]*):\s*$/.exec(line)
+      if (top) { section = top[1]; continue }
+      if (section !== 'refs') continue
+      const entry = /^ {2}(\S.*?):(?:\s|$)/.exec(line)
+      if (!entry) continue
+      assert(/^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[1]), `the credential store holds an invalid reference: ${entry[1]}`)
+    }
+    const afterSave = await rpc({ action: 'machines' })
+    assert(afterSave.keys['ssh:prod'] === path.join(sshDir, 'prod_ed25519'), 'the saved key is not reported back')
+
+    log(`keys ok: prod -> ${keys['ssh:prod']}, bastion -> ${keys['ssh:bastion']}, saved as ${saved.ref}`)
+    return { prod: keys['ssh:prod'], bastion: keys['ssh:bastion'], ref: saved.ref }
   },
 
   /**

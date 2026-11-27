@@ -3,7 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import Schema from '@deepseek-ai/schemastery'
-import { LocalTransport, transportForMachine, previewKeyPath } from './lib/transports.js'
+import { LocalTransport, transportForMachine, previewKeyPath, keyRefFor, isValidKeyRef } from './lib/transports.js'
 import { createTransportPool, mapLimit } from './lib/pool.js'
 import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
 import { buildEvents, toLiveInput } from './lib/events.js'
@@ -137,7 +137,11 @@ export async function apply(ctx, config = {}) {
   const getBinding = id => bindingsTable.get(id)
   const allBindings = () => [...bindingsTable.entries()].map(([, value]) => value)
   const machineById = id => machinesCache.machines.find(machine => machine.id === id)
-  const keyRefFor = machine => `conversation-sync/ssh-key/${machine.id}`
+  // keyRefFor() lives in lib/transports.js: a credential reference must be a
+  // POSIX identifier, and a machine id is not one. Building the name inline is
+  // what put an invalid entry in the user's credential store and stopped DSH
+  // from starting at all.
+  const refFor = machine => keyRefFor(machine.id)
 
   const refreshMachines = async () => {
     try {
@@ -456,7 +460,7 @@ export async function apply(ctx, config = {}) {
       const errors = [message]
       if (/no SSH private key|cannot read the SSH private key|credential/i.test(message)) {
         errors.push(
-          `save the private-key PATH for this machine (credential ${keyRefFor(machine)}), ` +
+          `save the private-key PATH for this machine (credential ${refFor(machine)}), ` +
           `or add 'IdentityFile' for it in ~/.ssh/config`,
         )
       }
@@ -600,9 +604,16 @@ export async function apply(ctx, config = {}) {
         if (!machine || machine.kind !== 'ssh') return Response.json({ error: 'unknown SSH machine' }, { status: 404 })
         const value = String(body.path ?? '')
         if (!value) return Response.json({ error: 'private-key path is required' }, { status: 400 })
-        await ctx.credentials.set(keyRefFor(machine), value)
+        const ref = refFor(machine)
+        // The credentials store brand-checks names and validates its whole file
+        // on load, so writing an out-of-grammar name here does not fail the
+        // call — it fails the NEXT launch of DSH. Refuse instead.
+        if (!isValidKeyRef(ref)) {
+          return Response.json({ error: `refusing to save under the invalid credential name "${ref}"` }, { status: 500 })
+        }
+        await ctx.credentials.set(ref, value)
         externalCache.at = 0
-        return Response.json({ ok: true, ref: keyRefFor(machine) })
+        return Response.json({ ok: true, ref: refFor(machine) })
       }
 
       case 'pair': {

@@ -90,7 +90,7 @@ space, and so on. Nothing is left for you to guess.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-126 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+136 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics, host keys, SQLite reads, jump-chain
 planning, the connection pool, the system-ssh transport, and the browser half
 through a stub module loader. CI additionally installs the packed plugin into five real DSH releases
@@ -98,6 +98,27 @@ and drives the actual RPC surface.
 
 See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job proves and how
 to run the harness locally.
+
+## If DSH will not start after saving a key path
+
+An earlier release (1.0.5 and older) named the saved key after the machine,
+producing a credential reference like `conversation-sync/ssh-key/ssh:prod`.
+DSH's credential store only accepts POSIX identifiers and validates the whole
+file when it loads, so that entry stopped DSH from starting at all — and the
+plugin could not repair it, because the plugin never got to run.
+
+If you are on such a build, run the repair script that ships inside your
+profile — from a terminal, before starting DSH:
+
+```bash
+node ~/.dsh/profiles/*/node_modules/dsh-conversation-sync/scripts/fix-credentials.mjs        # report
+node ~/.dsh/profiles/*/node_modules/dsh-conversation-sync/scripts/fix-credentials.mjs --write # repair
+```
+
+It renames only the invalid keys, keeps every value, saves a `.bak-` copy, and
+touches nothing else in the file. From 1.0.6 on this cannot happen again: the
+name is generated as `conversation_sync_ssh_key_<slug>_<digest>` and refused
+before it is written.
 
 ## License
 

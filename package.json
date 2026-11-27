@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-sync",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Import conversations into DSH from Claude Code, Codex CLI, WorkBuddy, TRAE, Antigravity, OpenCode, generic JSONL and DeepSeek exports — and keep them in sync both ways, over SSH too.",
   "keywords": [
     "dsh",
@@ -40,6 +40,7 @@
     "index.js",
     "client.js",
     "lib/*.js",
+    "scripts/fix-credentials.mjs",
     "cordis.patch.yml",
     "icon.svg",
     "locale/*.json",
@@ -49,7 +50,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "fix-credentials": "node scripts/fix-credentials.mjs"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.19.0",
