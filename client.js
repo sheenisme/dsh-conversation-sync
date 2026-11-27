@@ -39,6 +39,14 @@ window.__ModuleLoader__.load({
 .cs-title{display:flex;align-items:center;gap:8px;margin:0;font-size:16px;font-weight:600;line-height:24px}
 .cs-sub{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .cs-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+/* A framed group so it is clear the buttons inside act on the two selections
+   above and on nothing else. */
+.cs-actionBar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;
+  border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);
+  background:var(--dsw-alias-bg-layer-3)}
+.cs-actionScope{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 200px}
+.cs-actionTitle{font-size:12px;font-weight:600;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.cs-actionHint{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .cs-spacer{flex:1 1 auto}
 .cs-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;padding:0 10px;
   font:inherit;font-size:12px;line-height:18px;cursor:pointer;color:var(--dsw-alias-label-primary);
@@ -68,6 +76,17 @@ window.__ModuleLoader__.load({
 .cs-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .cs-item.sel{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent);
   box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-selected)}
+/* Already bound, but not the row the user is working on: present, dimmer, and
+   marked, so it is obvious why pairing it again is allowed (that is a merge). */
+.cs-item.bound{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 7%,transparent)}
+.cs-item.bound .cs-itemTitle{color:var(--dsw-alias-label-secondary)}
+.cs-item.bound::before{content:'';position:absolute;left:6px;top:50%;width:4px;height:4px;margin-top:-2px;
+  border-radius:999px;background:var(--dsw-alias-state-success-primary)}
+.cs-item{position:relative}
+.cs-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:16px;padding:0 4px;
+  border-radius:999px;font-size:10px;line-height:16px;font-weight:600;
+  color:var(--dsw-alias-state-success-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
 .cs-itemMain{flex:1 1 auto;min-width:0}
 .cs-itemTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px}
 .cs-itemMeta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px;
@@ -217,9 +236,12 @@ window.__ModuleLoader__.load({
       useEffect(() => { void load(); const id = setInterval(() => void load(), 5000); return () => clearInterval(id) }, [load])
 
       const stateFor = id => states.find(x => x.bindingId === id)
-      const boundDsh = id => bindings.find(b => b.dshSessionIds?.includes(id))
-      const boundExternal = (machineId, sessionPath) =>
-        bindings.find(b => b.externalPath === sessionPath && b.machineId === machineId)
+      // A session may be bound more than once on purpose: two sources bound to
+      // one DSH session is how you merge two conversations into one. So these
+      // return every match, and the trees show the count.
+      const boundDsh = id => bindings.filter(b => b.dshSessionIds?.includes(id))
+      const boundExternal = (machineId, sessionPath, kind) =>
+        bindings.filter(b => b.externalPath === sessionPath && b.machineId === machineId && (!kind || b.kind === kind))
       const toggleGroup = key => setOpenGroups(prev => ({ ...prev, [key]: prev[key] === false }))
 
       // LEFT TREE: workspace → session. A session cannot name its profile (the
@@ -338,6 +360,35 @@ window.__ModuleLoader__.load({
         try { await rpc('unbind', { id }); await load() } catch (e) { setError(e.message) } finally { setBusy(false) }
       }
 
+      // Select-all is derived from the table, so it can never drift out of step
+      // with the rows: it reads "all", "none" or "some" from the current list.
+      const checkedCount = bindings.filter(binding => binding.checked !== false).length
+      const allChecked = bindings.length > 0 && checkedCount === bindings.length
+
+      // One round trip for the whole table. Toggling row by row would leave the
+      // table half-updated if the user clicked twice quickly.
+      const toggleAll = async () => {
+        const next = !allChecked
+        setBusy(true)
+        try {
+          await rpc('setBindingAll', { checked: next })
+          await load()
+        } catch (e) { setError(e.message) } finally { setBusy(false) }
+      }
+
+      // Sync only what is checked, in one request. The host skips unchecked
+      // bindings on its own, so this is the same gate the poll uses.
+      const syncChecked = async () => {
+        setBusy(true)
+        try {
+          const result = await rpc('sync')
+          const results = result.results ?? []
+          setLastResult(results.length === 1 ? results[0] : { batch: results.length })
+          await refreshDshSessions()
+          await load()
+        } catch (e) { setError(e.message) } finally { setBusy(false) }
+      }
+
       const saveKey = async () => {
         if (!keyEdit || !keyValue.trim()) return
         setBusy(true)
@@ -385,19 +436,27 @@ window.__ModuleLoader__.load({
             count: group.rows.length,
             children: jsx('div', {
               children: group.rows.map(session => {
-                const bound = boundDsh(session.id)
+                const boundTo = boundDsh(session.id)
+                const selected = left === session.id
+                // Three states, because they answer three different questions:
+                // "is this the one I am about to use", "is it already wired up",
+                // and "is it wired up but not what I picked".
+                const state = selected ? 'sel' : boundTo.length ? 'bound' : ''
                 return jsxs('div', {
-                  className: `cs-item${left === session.id ? ' sel' : ''}`,
-                  onClick: () => setLeft(left === session.id ? '' : session.id),
+                  className: `cs-item${state ? ` ${state}` : ''}`,
+                  onClick: () => setLeft(selected ? '' : session.id),
                   role: 'button',
                   tabIndex: 0,
                   onKeyDown: event => { if (event.key === 'Enter') setLeft(session.id) },
                   children: [
                     jsxs('div', { className: 'cs-itemMain', children: [
-                      jsx('div', { className: 'cs-itemTitle', title: titleOf(session), children: titleOf(session) }),
+                      jsxs('div', { className: 'cs-itemTitle', title: titleOf(session), children: [
+                        titleOf(session),
+                        boundTo.length > 1 ? jsx('span', { className: 'cs-badge', title: t('panel.multiBound'), children: `×${boundTo.length}` }) : null,
+                      ] }),
                       jsxs('div', { className: 'cs-itemMeta', children: [
                         `${shortId(session.id)}${session.count !== undefined ? ` · ${session.count}` : ''}`,
-                        bound ? ` · ${t('panel.bound')}` : '',
+                        boundTo.length ? ` · ${t('panel.bound')}` : '',
                       ] }),
                     ] }),
                   ],
@@ -465,20 +524,24 @@ window.__ModuleLoader__.load({
                         children: jsx('div', {
                           children: rows.map(session => {
                             const selected = right?.machineId === machine.id && right?.path === session.path && right?.kind === kind
-                            const bound = boundExternal(machine.id, session.path)
+                            const boundTo = boundExternal(machine.id, session.path, kind)
+                            const state = selected ? 'sel' : boundTo.length ? 'bound' : ''
                             return jsxs('div', {
-                              className: `cs-item${selected ? ' sel' : ''}`,
+                              className: `cs-item${state ? ` ${state}` : ''}`,
                               onClick: () => setRight(selected ? null : { ...session, machineId: machine.id }),
                               role: 'button',
                               tabIndex: 0,
                               onKeyDown: event => { if (event.key === 'Enter') setRight({ ...session, machineId: machine.id }) },
                               children: [
                                 jsxs('div', { className: 'cs-itemMain', children: [
-                                  jsx('div', { className: 'cs-itemTitle', title: titleOf(session), children: titleOf(session) }),
+                                  jsxs('div', { className: 'cs-itemTitle', title: titleOf(session), children: [
+                                    titleOf(session),
+                                    boundTo.length > 1 ? jsx('span', { className: 'cs-badge', title: t('panel.multiBound'), children: `×${boundTo.length}` }) : null,
+                                  ] }),
                                   jsxs('div', { className: 'cs-itemMeta', children: [
                                     session.count !== undefined ? `${session.count} · ` : '',
                                     session.path,
-                                    bound ? ` · ${t('panel.bound')}` : '',
+                                    boundTo.length ? ` · ${t('panel.bound')}` : '',
                                   ] }),
                                 ] }),
                               ],
@@ -637,19 +700,67 @@ window.__ModuleLoader__.load({
 
         selection,
 
-        jsxs('div', { className: 'cs-bar', children: [
-          jsx('button', { className: 'cs-btn primary', disabled: busy || !left || !right, onClick: () => void pair('in'), children: t('panel.import') }),
-          jsx('button', { className: 'cs-btn primary', disabled: busy || !left || !right, onClick: () => void pair('out'), children: t('panel.export') }),
-          jsx('button', { className: 'cs-btn', disabled: busy || !left || !right, onClick: () => void pair('both'), children: t('panel.bidirectional') }),
-          jsx('button', { className: 'cs-btn', disabled: busy || !left || !right, onClick: () => void pair('auto'), children: t('panel.autoPair') }),
-          jsx('span', { className: 'cs-hint', children: t('panel.arrowsHint') }),
+        // The buttons below act on the two selections above and nothing else,
+        // so they say so and stay disabled until both exist.
+        jsxs('div', { className: 'cs-actionBar', children: [
+          jsxs('div', { className: 'cs-actionScope', children: [
+            jsx('span', { className: 'cs-actionTitle', children: t('panel.pairScope') }),
+            jsx('span', { className: 'cs-actionHint', children: t('panel.arrowsHint') }),
+          ] }),
+          jsxs('div', { className: 'cs-bar', children: [
+            jsx('button', {
+              className: 'cs-btn primary',
+              disabled: busy || !left || !right,
+              title: t('panel.importHint'),
+              onClick: () => void pair('in'),
+              children: t('panel.import'),
+            }),
+            jsx('button', {
+              className: 'cs-btn primary',
+              disabled: busy || !left || !right,
+              title: t('panel.exportHint'),
+              onClick: () => void pair('out'),
+              children: t('panel.export'),
+            }),
+            jsx('button', {
+              className: 'cs-btn',
+              disabled: busy || !left || !right,
+              title: t('panel.bothHint'),
+              onClick: () => void pair('both'),
+              children: t('panel.bidirectional'),
+            }),
+            jsx('button', {
+              className: 'cs-btn',
+              disabled: busy || !left || !right,
+              title: t('panel.autoPairHint'),
+              onClick: () => void pair('auto'),
+              children: t('panel.autoPair'),
+            }),
+          ] }),
         ] }),
 
         jsxs('div', { className: 'cs-pane', children: [
           jsxs('div', { className: 'cs-paneHead', children: [
             jsx('span', { children: t('panel.bindings') }),
+            jsx('span', { className: 'cs-tag', children: `${checkedCount}/${bindings.length}` }),
             jsx('span', { className: 'cs-spacer' }),
-            jsx('span', { className: 'cs-tag', children: bindings.filter(b => b.checked !== false).length }),
+            // These two act on the whole table, which the label says outright.
+            jsxs('label', { className: 'cs-check', title: t('panel.selectAllHint'), children: [
+              jsx('input', {
+                type: 'checkbox',
+                checked: allChecked,
+                disabled: busy || !bindings.length,
+                onChange: () => void toggleAll(),
+              }),
+              t('panel.selectAll'),
+            ] }),
+            jsx('button', {
+              className: 'cs-btn primary',
+              disabled: busy || !checkedCount,
+              title: t('panel.syncCheckedHint'),
+              onClick: () => void syncChecked(),
+              children: t('panel.syncChecked'),
+            }),
           ] }),
           renderBindings(),
         ] }),
@@ -669,11 +780,21 @@ window.__ModuleLoader__.load({
       'panel.newSessionHint': 'create a DSH session from the source on the right',
       'panel.dshColumn': 'DSH sessions',
       'panel.externalColumn': 'External sessions',
-      'panel.import': 'Import ←',
-      'panel.export': 'Export →',
+      'panel.import': '← Import into DSH',
+      'panel.export': 'Export to machine →',
       'panel.bidirectional': 'Both ways ⇄',
-      'panel.autoPair': 'Let the newer side win',
-      'panel.arrowsHint': 'Both sides are required: the left session is what gets written or grown, the right one is the source or destination.',
+      'panel.autoPair': 'Newer side wins ⤵',
+      'panel.arrowsHint': 'The arrow points at where the text goes: ← into the selected DSH session, → out to the selected machine file.',
+      'panel.pairScope': 'Create a binding from the two selections',
+      'panel.importHint': 'Append the machine session into the selected DSH session. Nothing is written to the machine.',
+      'panel.exportHint': 'Append the DSH session into the selected machine file. Nothing is written to DSH.',
+      'panel.bothHint': 'Write both ways, unless one side is clearly newer — then only that side is written.',
+      'panel.autoPairHint': 'Compare the two sides and write only the newer one into the older. Does nothing when they are in step.',
+      'panel.multiBound': 'Bound to more than one session — this merges conversations',
+      'panel.selectAll': 'All',
+      'panel.selectAllHint': 'Check or uncheck every binding. Only checked bindings sync.',
+      'panel.syncChecked': 'Sync checked',
+      'panel.syncCheckedHint': 'Sync every checked binding now, in one pass.',
       'panel.selectedLeft': 'Left',
       'panel.selectedRight': 'Right',
       'panel.none': 'nothing selected',
@@ -737,11 +858,21 @@ window.__ModuleLoader__.load({
       'panel.newSessionHint': '用右侧的来源创建一个 DSH 会话',
       'panel.dshColumn': 'DSH 会话',
       'panel.externalColumn': '外部会话',
-      'panel.import': '← 导入',
-      'panel.export': '导出 →',
+      'panel.import': '← 导入到 DSH',
+      'panel.export': '导出到机器 →',
       'panel.bidirectional': '双向 ⇄',
-      'panel.autoPair': '以较新一侧为准',
-      'panel.arrowsHint': '两侧都必须选定：左侧是被写入/追加的 DSH 会话，右侧是来源或目标。',
+      'panel.autoPair': '以较新一侧为准 ⤵',
+      'panel.arrowsHint': '箭头指向文字的去处：← 写入选中的 DSH 会话，→ 写入选中的机器文件。',
+      'panel.pairScope': '用左右两个选择建立绑定',
+      'panel.importHint': '把机器上的会话追加进选中的 DSH 会话。不会改动机器上的文件。',
+      'panel.exportHint': '把 DSH 会话追加进选中的机器文件。不会改动 DSH。',
+      'panel.bothHint': '两个方向都写；但如果一侧明显更新，则只写那一侧。',
+      'panel.autoPairHint': '先比对两侧，只把较新的一侧写进较旧的一侧。两侧一致时什么都不做。',
+      'panel.multiBound': '绑定了多个会话——相当于合并对话',
+      'panel.selectAll': '全选',
+      'panel.selectAllHint': '一次勾选或取消所有绑定。只有勾选的绑定才会同步。',
+      'panel.syncChecked': '同步已勾选',
+      'panel.syncCheckedHint': '立刻把已勾选的绑定全部同步一遍。',
       'panel.selectedLeft': '左侧',
       'panel.selectedRight': '右侧',
       'panel.none': '未选择',
@@ -851,10 +982,17 @@ window.__ModuleLoader__.load({
             locale: NS,
             inject: () => ({}),
           }, MarkIcon)),
+          // `main` is keyed by `key`, while `sidebar.panellist` is keyed by `id`.
+          // They must carry the SAME value, because clicking the sidebar entry
+          // calls layout.selectPanel(id), and that throws
+          //   layout.selectPanel: main panel "<id>" is not registered
+          // unless a main panel with that key exists. Passing `id` here left the
+          // entry looking installed but opening nothing at all.
           main: () => ctx.slots.inject('main', () => ctx.slots.register({
             name: 'main',
-            id: PKG,
+            key: PKG,
             order: 30,
+            locale: NS,
             inject: () => ({}),
           }, Page)),
         },

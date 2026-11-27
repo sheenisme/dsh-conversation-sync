@@ -38,21 +38,36 @@ is the unit of work: the left session is what gets written or grown, the right
 one is the source or destination. A row reading **New session** on the left
 covers importing a conversation DSH has never seen.
 
-Then choose how the pair behaves:
+Then choose how the pair behaves. The arrows point at where the text goes, so a
+button never has to be decoded:
 
-| Direction | What it does |
+| Button | What it does |
 | --- | --- |
-| `Auto` | Follow whichever side actually changed; do nothing when neither did. |
-| `Import only` / `Export only` | Pin one side, even when the other is newer. |
-| `Both ways` | Both legs when the sides agree, otherwise only the newer one. |
+| **← Import into DSH** | Append the machine session into the selected DSH session. The machine file is not touched. |
+| **Export to machine →** | Append the DSH session into the selected machine file. DSH is not touched. |
+| **Both ways ⇄** | Both legs, unless one side is clearly newer — then only that side is written. |
+| **Newer side wins ⤵** | Compare, then write only the newer side into the older. Nothing happens when they are in step. |
 
-Bindings are listed at the bottom. Each row has:
+The group is framed and captioned because those four buttons act on the two
+selections above and on nothing else; they stay disabled until both exist.
 
-- a **checkbox** — only checked bindings are synced, by a bulk run or by the
-  automatic poll;
+Each row in either tree shows its state at a glance: **selected** (accent
+outline), **already bound** (green tint and a dot), and **bound more than once**
+(a `×N` badge). A bound session does **not** disappear — binding one session to
+several sources is allowed on purpose, because that is how two conversations get
+merged into one.
+
+Bindings are listed at the bottom. The header carries a **select-all** switch
+(one round trip, so a fast double click cannot leave the table half-updated), a
+count of `checked/total`, and **Sync checked** — the batch button for everything
+that is ticked. Each row has:
+
+- a **checkbox** — only checked bindings are synced, by a bulk run, by
+  **Sync checked**, or by the automatic poll;
+- a **direction** — `Auto` (the default for a new binding) or a pinned one;
 - a **mode** — **Manual** (the default) or Automatic;
 - the **newer side** at that moment, with the reason on hover;
-- **Sync now** and **Remove**.
+- **Sync now** (this row only) and **Remove**.
 
 ### Which side is newer?
 
@@ -168,7 +183,7 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-169 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+171 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics and file-level session restore, host
 keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
 transport, the one-folder migration, and the browser half through a stub module

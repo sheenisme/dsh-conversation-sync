@@ -54,7 +54,7 @@ async function loadClientSync() {
   module.apply(ctx)
   // Let the preferences fetch resolve and its .then register the entries.
   for (let i = 0; i < 5; i += 1) await new Promise(resolve => setImmediate(resolve))
-  return { module, dictionaries, registrations, definition }
+  return { module, dictionaries, registrations, definition, source }
 }
 
 test('client: declares the services it actually uses', async () => {
@@ -86,6 +86,15 @@ test('client: the sidebar entry is a real sidebar panel, on by default', async (
   const panel = registrations.find(entry => entry.name === 'sidebar.panellist')
   assert.equal(panel.id, 'dsh-conversation-sync')
   assert.equal(typeof panel.label, 'function')
+
+  // The sidebar keys its entries by `id`, but a main panel is keyed by `key`.
+  // Clicking an entry calls layout.selectPanel(id), which throws
+  //   layout.selectPanel: main panel "<id>" is not registered
+  // unless a main panel carries that exact key. Registering `main` with `id`
+  // made the entry look installed and open nothing - the reported bug.
+  const main = registrations.find(entry => entry.name === 'main')
+  assert.equal(main.key, 'dsh-conversation-sync', 'the main panel must be keyed, not id-ed')
+  assert.equal(main.key, panel.id, 'the sidebar id and the main key must be the same value')
 })
 
 test('client: a placement switched off is never registered', async () => {
@@ -102,6 +111,24 @@ test('client: turning off Settings removes only that entry', async () => {
   assert.ok(!names.includes('settings.section'), 'the Settings entry must not appear when its switch is off')
   assert.ok(!names.includes('settings.section.icon'))
   assert.ok(names.includes('sidebar.panellist'), 'the sidebar entry is independent')
+})
+
+test('client: the bindings table offers select-all and a batch sync', async () => {
+  const { source } = await loadClient()
+  // Both act on the whole table, so both must exist and go through one request:
+  // toggling row by row leaves the table half-updated on a fast double click.
+  assert.match(source, /setBindingAll/, 'select-all must use the single-request RPC')
+  assert.match(source, /syncChecked/, 'the table needs a batch sync button')
+  assert.match(source, /checkedCount/, 'the header must show how many are checked')
+})
+
+test('client: a session bound more than once is still visible and marked', async () => {
+  const { source } = await loadClient()
+  // Binding one session twice is how two conversations get merged, so the row
+  // must not disappear once it is bound - it changes state instead.
+  assert.match(source, /boundDsh = id => bindings\.filter/, 'bound sessions are a list, not a single match')
+  assert.match(source, /cs-item\.bound/, 'a bound session needs its own visual state')
+  assert.match(source, /cs-badge/, 'more than one binding needs a count badge')
 })
 
 test('client: both dictionaries carry the same keys, including the settings label', async () => {

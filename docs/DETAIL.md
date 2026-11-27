@@ -244,7 +244,7 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 149 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 171 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -343,6 +343,24 @@ run (the witness is its `lastSyncAt`, since pairing performs the first sync
 itself), re-checking puts it back and writes a non-empty file, and direction
 `auto` does nothing when nothing changed but imports as soon as the source is
 appended to.
+
+## Why the sidebar entry needs a `key`
+
+A `sidebar.panellist` entry is keyed by `id`, but the page it opens lives in the
+`main` slot, which is keyed by `key`. Clicking the entry calls
+`ctx.layout.selectPanel(id)`, and `LayoutController.selectPanel` throws
+
+    layout.selectPanel: main panel "<id>" is not registered
+
+unless `ctx.slots.entries('main').some(entry => entry.options.key === id)`.
+Registering `main` with `id` therefore produces an entry that looks installed
+and opens nothing at all — no error in the console, no visible change. The two
+values must be identical, and `test/client.test.js` asserts exactly that.
+
+The icon is drawn separately: the sidebar renders
+`renderFactorySlot('sidebar.panel.icon', {id, size, active}, {only: id})`, so a
+plugin only registers the panellist entry (with its component) and lets the
+sidebar ask for the glyph.
 
 ## Which side is newer
 

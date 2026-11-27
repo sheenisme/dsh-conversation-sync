@@ -47,7 +47,10 @@ const bindingSchema = z.object({
   dbPath: z.string().optional(),
   kind: z.enum(KINDS),
   dshSessionIds: z.array(z.string()).default([]),
-  direction: z.enum(DIRECTIONS).default('both'),
+  // A new binding follows whichever side is newer. Pinning a direction is a
+  // deliberate choice the user makes afterwards, not the safe default: a fixed
+  // direction can push the older copy over the newer one.
+  direction: z.enum(DIRECTIONS).default('auto'),
   keyRef: z.string().optional(),
   pollMs: z.number().min(500).default(2000),
   // Manual by default: a binding that starts syncing on its own the moment it
@@ -973,6 +976,21 @@ export async function apply(ctx, config = {}) {
         await bindingsTable.put(id, next)
         if (next.checked === false) dirty.delete(id)
         return Response.json({ binding: getBinding(id) })
+      }
+
+      case 'setBindingAll': {
+        // One round trip for the select-all switch. Doing it row by row would
+        // leave the table half-updated if the user clicked twice quickly.
+        const wanted = body.checked !== false
+        const updated = []
+        for (const binding of allBindings()) {
+          if ((binding.checked !== false) === wanted) continue
+          const next = { ...binding, checked: wanted }
+          await bindingsTable.put(next.id, next)
+          if (!wanted) dirty.delete(next.id)
+          updated.push(next.id)
+        }
+        return Response.json({ updated, checked: wanted, bindings: allBindings() })
       }
 
       case 'unbind': {

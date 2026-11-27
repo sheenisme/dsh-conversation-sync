@@ -549,11 +549,38 @@ const scenarios = {
       `auto did not import after the source was edited: ${JSON.stringify(auto2Result)}`)
     const autoResult2 = auto2Result
 
+    // Select-all is one round trip and must be reversible.
+    const allOff = await rpc({ action: 'setBindingAll', checked: false })
+    assert((allOff.bindings ?? []).every(item => item.checked === false),
+      `select-all-off left a binding checked: ${JSON.stringify(allOff.bindings)}`)
+    const allOn = await rpc({ action: 'setBindingAll', checked: true })
+    assert((allOn.bindings ?? []).every(item => item.checked !== false),
+      `select-all-on left a binding unchecked: ${JSON.stringify(allOn.bindings)}`)
+
+    // A session may be bound more than once: that is how two conversations get
+    // merged, so a second binding to the same DSH session must be allowed.
+    const mergeTarget = path.join(args.home, 'merged.jsonl')
+    const merged = await rpc({
+      action: 'pair',
+      binding: {
+        machineId: 'local', externalPath: path.join(args.fixtures, FORMATS[1].file),
+        kind: FORMATS[1].kind, direction: 'in', dshSessionIds: [row.id],
+      },
+    })
+    const mergedResult = merged.result ?? merged
+    assert(!mergedResult.error, `a second binding to one session was refused: ${JSON.stringify(mergedResult)}`)
+    const all = await rpc({ action: 'bindings' })
+    const onSameSession = (all.bindings ?? []).filter(item => item.dshSessionIds?.includes(row.id))
+    assert(onSameSession.length >= 2,
+      `the same DSH session should carry several bindings (merge), got ${onSameSession.length}`)
+    log(`merge ok: ${onSameSession.length} bindings on one DSH session`)
+
     log(`bindings ok: manual default, checkbox gated, repeat auto was a no-op, edited source imported`)
     return {
       autoSync: stored.autoSync,
       checked: stored.checked,
       repeatAuto: autoResult.direction,
+      mergeBindings: onSameSession.length,
       editedAuto: autoResult2.direction,
       newer: autoResult2.comparison.newer,
     }
