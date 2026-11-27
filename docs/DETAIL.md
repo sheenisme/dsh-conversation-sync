@@ -70,8 +70,13 @@ as DSH v4 events using only known event types (`turn/start`, `step/start`,
 `system/message`, `user/message`, `assistant/message`, `tool/call`,
 `tool/result`, `step/end`, `turn/end`, `session/title`), with contiguous
 sequence numbers and monotonic timestamps. Imported sessions are materialized
-through `sessionPersistence.create()` and attached to a per-machine workspace
-under `~/.dsh/conversation-sync/workspaces/`. Live sessions are appended via
+through `sessionPersistence.create()` and attached to the single `会话同步`
+workspace at `~/.dsh/conversation-sync/workspaces/sync`. One workspace, not one
+per machine: `dsh-workspace`'s `attachSession()` throws unless the session's
+`cwd` resolves to exactly the workspace path, and `candidateMatches` filters by
+that same equality, so a per-machine directory would have to be a separate
+workspace. Machines are distinguished by the session title prefix instead
+(`BAAI-Ascend · <title>`; local sessions keep the bare title). Live sessions are appended via
 `Session.append()` so the agent loop sees them.
 
 The v4 format is strict, and two of its rules are easy to get wrong in a way
@@ -203,7 +208,9 @@ component's session log).
   wedged mount cannot stall the poll loop indefinitely.
 - HTTP route `/api/conversation-sync/rpc` (POST) exposes `status`, `machines`,
   `sessions`, `bindings`, `setKey`, `pair`, `unbind`, `sync`. It is owner-only,
-  as all DSH web routes are.
+  as all DSH web routes are. Until storage has opened it answers `503 not ready`;
+  the panel treats that as a loading state, because rendering it as "no sessions"
+  made the panel look empty for the first seconds after it opened.
 
 ## Why credential names are generated, not derived
 
@@ -230,15 +237,14 @@ original id keeps two ids that normalise alike (`ssh:A-B` vs `ssh:A_B`) from
 sharing one credential. `isValidKeyRef()` guards every read and write, so an
 out-of-grammar name is treated as "nothing saved" rather than thrown.
 
-For stores already poisoned by an older build, `scripts/fix-credentials.mjs`
-runs outside DSH, renames only the invalid keys in the `refs:` section, keeps
-every value, and writes a `.bak-` copy. `test/fix-credentials.test.js` and the
-`keys` CI scenario both pin this; the scenario asserts on the YAML file, because
-a unit test cannot catch a name that only fails on the next process launch.
+The `keys` CI scenario asserts on the YAML file rather than on the RPC reply,
+because a name that is only rejected on the next process launch is invisible to
+a unit test. Builds up to 1.0.5 wrote such a name; those versions were never
+published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 136 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 131 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -260,7 +266,7 @@ that unit fixtures cannot:
 | `install-dsh.mjs` | installs one DSH version so it can actually run under plain Node — it reads `@deepseek-ai/dsh-app-boot`'s peer ranges from the registry, because npm does not install the peers of a transitive package |
 | `harness.mjs` | shared profile bootstrap, health-line wait, activation check and auth-cookie handshake |
 | `boot-check.mjs` | "does this DSH version support the plugin": install, boot, import, read back |
-| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `reimport`, `direction`, `keys`, `ssh` — the user journey over the real RPC surface |
+| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `empty`, `reimport`, `direction`, `keys`, `ssh` — the user journey over the real RPC surface |
 
 `.github/workflows/ci.yml` runs three jobs:
 
@@ -309,8 +315,8 @@ nobody can open from CI — which is exactly what the first tagged release did.
 
 ### What only a harness can catch
 
-Four defects in this plugin were invisible to the unit suite because they live in
-the wiring between the RPC surface and the modules, not inside any one module:
+Several defects in this plugin were invisible to the unit suite because they live
+in the wiring between the RPC surface and the modules, not inside any one module:
 
 - `tool/result` written in the retired V3 shape — every conversation containing a
   tool call failed to import;
@@ -318,8 +324,14 @@ the wiring between the RPC surface and the modules, not inside any one module:
   the session log then read back as corrupt;
 - `syncAll` dropping its direction argument — clicking Export ran an Import;
 - the export cursor sharing a map with the import cursor — the first export
-  wrote an empty file and reported success.
+  wrote an empty file and reported success;
+- an import with no records materializing a session that held only a title — a
+  compacted rollout looked like a successful import and displayed nothing.
 
-The `direction` scenario exists specifically because of the last two. It syncs a
-binding stored as `in` with an explicit `out` and asserts the file received
-content; that is the only level at which the bug is observable.
+The `empty` scenario pins the last one: it imports a real compacted Codex rollout
+and asserts the import is refused with a reason, that no session was created, and
+that no dead binding was left in the list.
+
+The `direction` scenario exists specifically for the `syncAll` and cursor
+defects. It syncs a binding stored as `in` with an explicit `out` and asserts the
+file received content; that is the only level at which the bug is observable.

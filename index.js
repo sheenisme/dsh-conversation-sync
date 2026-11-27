@@ -176,32 +176,56 @@ export async function apply(ctx, config = {}) {
 
   // ---------------------------------------------------------- session helpers
 
-  const ensureWorkspace = async (binding, state) => {
-    if (state.workspaceId && workspaces.get(state.workspaceId)) return state.workspaceId
-    const dir = path.join(WORKSPACE_ROOT, safeId(binding.machineId))
-    await localTransport.mkdir(dir)
-    const label = machineById(binding.machineId)?.label ?? binding.machineId
-    const ws = await workspaces.create(dir, `会话同步 · ${label}`)
-    state.workspaceId = ws.id
-    await saveState(state)
+  // ONE workspace for every machine. DSH requires a session's cwd to equal its
+  // workspace path exactly (dsh-workspace/lib/index.js:122 throws otherwise, and
+  // candidateMatches filters by the same equality), so "one workspace with a
+  // folder per machine" is not expressible — a per-machine directory would have
+  // to be its own workspace, which is exactly the clutter being fixed here.
+  // Machines are distinguished by the session title prefix instead.
+  const SYNC_WORKSPACE_DIR = path.join(WORKSPACE_ROOT, 'sync')
+  const SYNC_WORKSPACE_TITLE = '会话同步'
+  const ensureWorkspace = async (state) => {
+    if (state.workspaceId && workspaces.get(state.workspaceId)) {
+      const existing = workspaces.get(state.workspaceId)
+      // Adopt an older single-machine workspace instead of leaving it behind:
+      // its directory is where previously imported sessions already live.
+      if (existing.path === SYNC_WORKSPACE_DIR) return state.workspaceId
+    }
+    await localTransport.mkdir(SYNC_WORKSPACE_DIR)
+    const ws = await workspaces.create(SYNC_WORKSPACE_DIR, SYNC_WORKSPACE_TITLE)
+    if (state.workspaceId !== ws.id) {
+      state.workspaceId = ws.id
+      await saveState(state)
+    }
     return ws.id
+  }
+
+  /** `BAAI-Ascend · <title>` — the only per-machine grouping DSH permits. */
+  const machineLabel = machineId => machineById(machineId)?.label ?? machineId
+  const titledFor = (binding, title) => {
+    const label = machineLabel(binding.machineId)
+    const base = String(title ?? '').trim() || path.posix.basename(binding.externalPath) || binding.name
+    if (binding.machineId === 'local') return base
+    return base.startsWith(`${label} · `) ? base : `${label} · ${base}`
   }
 
   /** Materialize a brand-new DSH session from normalized records. */
   const createSession = async (binding, state, records, title) => {
+    if (!records.length) throw new Error(`no importable messages in ${binding.externalPath}`)
     const id = `conversation-${randomUUID()}`
     const header = {
       version: 4,
       id,
       createdAt: records.find(record => record.ts)?.ts ?? Date.now(),
-      cwd: path.join(WORKSPACE_ROOT, safeId(binding.machineId)),
+      cwd: SYNC_WORKSPACE_DIR,
       isSeeded: false,
     }
     const events = buildEvents(records, { createId: randomUUID })
-    if (title) {
+    const named = titledFor(binding, title)
+    if (named) {
       events.push({
         type: 'session/title',
-        data: { title, messageSeqs: [], source: { kind: 'user' } },
+        data: { title: named, messageSeqs: [], source: { kind: 'user' } },
         seq: events.length,
         time: events.at(-1)?.time ?? header.createdAt,
       })
@@ -214,7 +238,7 @@ export async function apply(ctx, config = {}) {
       await handle.close()
     }
     projectionCache?.coldSnapshot?.(header, 0, events)
-    await ensureWorkspace(binding, state)
+    await ensureWorkspace(state)
     await workspaces.get(state.workspaceId)?.attachSession(id)
     return { id, lastSeq: events.length }
   }
@@ -308,6 +332,15 @@ export async function apply(ctx, config = {}) {
     const delta = await readJsonlDelta(transport, binding.externalPath, binding.kind, state.cursor)
     if (delta.absent) throw new Error(`source file not found: ${binding.externalPath}`)
     if (!binding.dshSessionIds.length) {
+      // An empty source used to materialize an empty DSH session: a session
+      // title with no conversation in it, which looks like a successful import
+      // and shows nothing. Refuse, and say why in terms the user can act on.
+      if (!delta.records.length) {
+        throw new Error(
+          `${binding.externalPath} has no importable messages. ` +
+          'Compacted or metadata-only rollouts carry no conversation text; pick a session that has messages.',
+        )
+      }
       const created = await createSession(binding, state, delta.records, binding.name)
       binding.dshSessionIds.push(created.id)
       state.dshSeqs[created.id] = created.lastSeq
@@ -631,6 +664,15 @@ export async function apply(ctx, config = {}) {
         const state = getState(binding.id)
         await saveState(state)
         const result = await syncBinding(binding, true)
+        // A pairing that produced nothing is not a binding the user wants to
+        // keep: leave it out of the list so a failed first sync does not add a
+        // dead row that has to be removed by hand.
+        if (result?.error && !getBinding(binding.id)?.dshSessionIds?.length) {
+          await bindingsTable.delete(binding.id)
+          await statesTable.delete(binding.id)
+          dirty.delete(binding.id)
+          return Response.json({ result })
+        }
         return Response.json({ binding: getBinding(binding.id), result })
       }
 

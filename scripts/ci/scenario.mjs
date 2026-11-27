@@ -15,6 +15,7 @@
  *   export    a DSH session is written back out as tool records
  *   formats   every supported tool format imports through the same path
  *   failure   a broken source fails with a reason and recovery conditions
+ *   empty     a source with no conversation is refused, not imported as a shell
  *   reimport  syncing twice does not duplicate already-imported content
  *   keys      SSH keys resolve credential -> IdentityFile -> ~/.ssh defaults
  *   ssh       a session on a "remote" host is discovered and imported over ssh
@@ -136,6 +137,50 @@ const scenarios = {
     assert(writeResult.error, `an unwritable path reported no error: ${JSON.stringify(write)}`)
     log(`unwritable destination reported: ${writeResult.error}`)
     return { reason: result.failure.reason, stale: staleResult.error }
+  },
+
+  /**
+   * An import that would produce nothing must be REFUSED, not silently turned
+   * into an empty session. Codex writes a 3-line rollout after compaction
+   * (`session_meta` + an encrypted `compaction` + `thread_settings_applied`);
+   * importing one used to create a DSH session holding only a title, which looks
+   * like a successful import and shows nothing at all.
+   */
+  async empty(args, rpc) {
+    const source = path.join(args.home, 'compacted-rollout.jsonl')
+    await fs.writeFile(source, [
+      JSON.stringify({ type: 'session_meta', payload: { id: 'compacted', cwd: '/tmp' } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'compaction', encrypted_content: 'gAAAAA' } }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'thread_settings_applied' } }),
+    ].join('\n') + '\n')
+
+    const before = await rpc({ action: 'sessions', force: true })
+    const paired = await rpc({
+      action: 'pair',
+      binding: { machineId: 'local', externalPath: source, kind: 'codex', direction: 'in', dshSessionIds: [] },
+    })
+    const result = paired.result ?? paired
+    assert(result.error, `an empty rollout imported without an error: ${JSON.stringify(paired)}`)
+    assert(/no importable messages/.test(result.error), `the error does not explain the cause: ${result.error}`)
+
+    // It must also leave nothing behind: no empty session, no dead binding.
+    const after = await rpc({ action: 'sessions', force: true })
+    assert((after.dsh?.length ?? 0) === (before.dsh?.length ?? 0),
+      `an empty import created a session: ${JSON.stringify(after.dsh?.slice(0, 2))}`)
+    const bindings = await rpc({ action: 'bindings' })
+    const dead = (bindings.bindings ?? []).filter(item => item.externalPath === source)
+    assert(dead.length === 0, `a failed first import left a binding behind: ${JSON.stringify(dead)}`)
+
+    // A real source still imports, and every machine's sessions share ONE
+    // workspace (DSH requires cwd === workspace path, so per-machine folders
+    // would each have to be a separate workspace).
+    const first = await importFile(rpc, args, FORMATS[0])
+    const second = await importFile(rpc, args, FORMATS[1])
+    const workspaces = await rpc({ action: 'sessions', force: true })
+    const titles = new Set([first.row.title, second.row.title])
+    assert(titles.size === 2, `the two imports collapsed into one session: ${[...titles]}`)
+    log(`empty ok: refused with "${result.error.slice(0, 60)}…"; 2 imports, ${workspaces.dsh.length} row(s)`)
+    return { reason: result.error }
   },
 
   /**

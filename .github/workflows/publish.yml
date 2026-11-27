@@ -43,7 +43,7 @@ jobs:
         run: |
           npm pack --silent >/dev/null
           tar -tf ./*.tgz > /tmp/files.txt
-          for required in index.js client.js cordis.patch.yml lib/events.js lib/transports.js lib/pool.js lib/openssh.js lib/opencode.js scripts/fix-credentials.mjs locale/en.json locale/zh.json LICENSE; do
+          for required in index.js client.js cordis.patch.yml lib/events.js lib/transports.js lib/pool.js lib/openssh.js lib/opencode.js locale/en.json locale/zh.json LICENSE; do
             if ! grep -q "package/$required" /tmp/files.txt; then
               echo "::error::the tarball is missing $required"
               exit 1

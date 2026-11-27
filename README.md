@@ -49,7 +49,10 @@ profile manifest has to be edited by hand.
    authentication goes through `ssh-agent` instead.
 3. Pick a machine on the right; its sessions are discovered automatically.
 4. Select a session on each side, choose a direction, and the pair becomes an
-   active binding. Imported sessions land in a workspace grouped by machine.
+   active binding. Every import lands in one `会话同步` workspace, and a
+   remote session's title is prefixed with its machine (`BAAI-Ascend · ...`),
+   because DSH requires a session's working directory to equal its workspace
+   path — a per-machine folder would have to be its own workspace.
 
 ## Supported sources
 
@@ -97,7 +100,7 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-136 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+131 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics, host keys, SQLite reads, jump-chain
 planning, the connection pool, the system-ssh transport, and the browser half
 through a stub module loader. CI additionally installs the packed plugin into five real DSH releases
@@ -105,27 +108,6 @@ and drives the actual RPC surface.
 
 See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job proves and how
 to run the harness locally.
-
-## If DSH will not start after saving a key path
-
-An earlier release (1.0.5 and older) named the saved key after the machine,
-producing a credential reference like `conversation-sync/ssh-key/ssh:prod`.
-DSH's credential store only accepts POSIX identifiers and validates the whole
-file when it loads, so that entry stopped DSH from starting at all — and the
-plugin could not repair it, because the plugin never got to run.
-
-If you are on such a build, run the repair script that ships inside your
-profile — from a terminal, before starting DSH:
-
-```bash
-node ~/.dsh/profiles/*/node_modules/dsh-conversation-sync/scripts/fix-credentials.mjs        # report
-node ~/.dsh/profiles/*/node_modules/dsh-conversation-sync/scripts/fix-credentials.mjs --write # repair
-```
-
-It renames only the invalid keys, keeps every value, saves a `.bak-` copy, and
-touches nothing else in the file. From 1.0.6 on this cannot happen again: the
-name is generated as `conversation_sync_ssh_key_<slug>_<digest>` and refused
-before it is written.
 
 ## License
 

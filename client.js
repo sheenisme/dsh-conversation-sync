@@ -21,7 +21,11 @@ window.__ModuleLoader__.load({
     const s = {
       wrap: { display: 'flex', flexDirection: 'column', gap: 8 },
       row: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-      columns: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, alignItems: 'start' },
+      // The settings section renders inside a narrow `.options` column, so a
+      // fixed two-column grid collapsed into a vertical stack there. auto-fit
+      // keeps two columns when there is room and degrades to one without
+      // squeezing either pane.
+      columns: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12, alignItems: 'start' },
       pane: { border: '1px solid var(--dsh-border, #666)', borderRadius: 8, padding: 10, minHeight: 240 },
       paneHead: { fontSize: 13, fontWeight: 600, marginBottom: 8 },
       card: { border: '1px solid var(--dsh-border, #555)', borderRadius: 6, padding: 8, margin: '6px 0', cursor: 'pointer' },
@@ -67,6 +71,10 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
       const [lastResult, setLastResult] = useState(undefined)
+      // The host answers 503 "not ready" until its storage is open. That is a
+      // loading state, not an empty one: showing "no sessions" for it is what
+      // made the panel look empty for the first seconds after it opened.
+      const [loading, setLoading] = useState(true)
 
       const load = useCallback(async (force = false) => {
         try {
@@ -82,7 +90,11 @@ window.__ModuleLoader__.load({
           setBindings(b.bindings ?? [])
           setStates(b.states ?? [])
           setError('')
-        } catch (e) { setError(e.message) }
+          setLoading(false)
+        } catch (e) {
+          // "not ready" resolves itself; anything else is a real error to show.
+          if (!/not ready/i.test(e.message)) { setError(e.message); setLoading(false) }
+        }
       }, [])
 
       useEffect(() => { void load(); const id = setInterval(() => void load(), 5000); return () => clearInterval(id) }, [load])
@@ -163,6 +175,7 @@ window.__ModuleLoader__.load({
           ...(lastResult.failure.cleanup ?? []).map((c, i) => jsx('div', { style: s.condition, children: `• ${c}` }, `c${i}`)),
         ] }) : null,
         machineWarnings.length ? jsx('div', { style: s.warn, children: machineWarnings.join(' · ') }) : null,
+        loading ? jsx('div', { style: s.small, children: t('panel.loading') }) : null,
 
         jsxs('div', { style: s.pane, children: [
           jsx('div', { style: s.paneHead, children: t('panel.machines') }),
@@ -212,7 +225,7 @@ window.__ModuleLoader__.load({
                   ],
                 })
               }),
-              (cache.dsh?.length ?? 0) === 0 ? jsx('div', { style: s.small, children: t('panel.noDsh') }) : null,
+              (cache.dsh?.length ?? 0) === 0 && !loading ? jsx('div', { style: s.small, children: t('panel.noDsh') }) : null,
             ] }),
           ] }),
           jsxs('div', { style: s.pane, children: [
@@ -236,7 +249,7 @@ window.__ModuleLoader__.load({
                   ],
                 })
               }),
-              externalSessions.length === 0 ? jsx('div', { style: s.small, children: t('panel.noExternal') }) : null,
+              externalSessions.length === 0 && !loading ? jsx('div', { style: s.small, children: t('panel.noExternal') }) : null,
             ] }),
           ] }),
         ] }),
@@ -291,6 +304,7 @@ window.__ModuleLoader__.load({
       'panel.import': '← Import to DSH', 'panel.export': 'Export to remote →', 'panel.bidirectional': '⇄ Sync both ways',
       'panel.arrowsHint': 'Select one session on each side, then choose a direction. A one-sided session is imported/exported first, then kept in sync.',
       'panel.bindings': 'Active sync bindings', 'panel.bound': 'bound:', 'panel.externalOnly': 'No DSH session yet — use Import to create one, or select a DSH session on the left before exporting.',
+      'panel.loading': 'Loading sessions… (the plugin host is still starting)',
       'panel.noDsh': 'No DSH sessions found.', 'panel.noExternal': 'No sessions found on this machine. Configure the SSH key and refresh.',
       'panel.noBindings': 'No bindings yet. Pick two sessions above and choose a direction.',
       'panel.lastSync': 'Last sync:', 'panel.failure': 'Sync failed:', 'panel.pickLeft': 'Select a DSH session on the left first.',
@@ -311,6 +325,7 @@ window.__ModuleLoader__.load({
       'panel.import': '← 导入到 DSH', 'panel.export': '导出到远端 →', 'panel.bidirectional': '⇄ 双向同步',
       'panel.arrowsHint': '左右各选一个会话，再选择方向。只有一侧有的会话会先导入/导出，然后保持同步。',
       'panel.bindings': '生效中的同步绑定', 'panel.bound': '已绑定：', 'panel.externalOnly': '尚无 DSH 会话——先点“导入”创建，或先在左侧选中 DSH 会话再导出。',
+      'panel.loading': '正在加载会话……（插件宿主还在启动）',
       'panel.noDsh': '未找到 DSH 会话。', 'panel.noExternal': '该机器上未找到会话。请配置 SSH 私钥后刷新。',
       'panel.noBindings': '还没有绑定。在上方选择两个会话并选择方向。',
       'panel.lastSync': '上次同步：', 'panel.failure': '同步失败：', 'panel.pickLeft': '请先在左侧选择一个 DSH 会话。',
@@ -345,9 +360,22 @@ window.__ModuleLoader__.load({
         label: () => tr('settings.nav'),
       }, () => jsx(Page, { t: tr }))), 'conversation-sync/settings')
 
+      // The slot passes {size, active}. Draw a real 16px icon instead of a text
+      // arrow: the nav renders icons at a fixed size next to SVG icons, and a
+      // glyph sits on a different baseline and changes width across fonts.
       ctx.effect(() => ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
-        name: 'settings.section.icon', id: PKG,
-      }, () => jsx('span', { 'data-conversation-sync-icon': true, style: { display: 'inline-flex' } }, '⇄'))), 'conversation-sync/settings-icon')
+        name: 'settings.section.icon', id: PKG, order: 45,
+      }, ({ size = 16, active } = {}) => jsx('svg', {
+        width: size, height: size, viewBox: '0 0 16 16', fill: 'none',
+        stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round',
+        'aria-hidden': true, opacity: active === false ? 0.75 : 1,
+        'data-conversation-sync-icon': true,
+        children: [
+          // Two opposed arrows: the bidirectional promise of the feature.
+          jsx('path', { d: 'M2.5 5.5h8.5M8.5 3l2.5 2.5-2.5 2.5', key: 'a' }),
+          jsx('path', { d: 'M13.5 10.5H5M7.5 8 5 10.5 7.5 13', key: 'b' }),
+        ],
+      }))), 'conversation-sync/settings-icon')
     }
 
     return { apply, inject }

@@ -40,7 +40,7 @@ jobs:
                            package/lib/opencode.js package/lib/pool.js \
                            package/lib/openssh.js package/lib/hostkey.js \
                            package/locale/en.json package/locale/zh.json \
-                           package/scripts/fix-credentials.mjs package/LICENSE; do
+                           package/LICENSE; do
             grep -qx "$required" /tmp/packed.txt || { echo "missing from tarball: $required"; exit 1; }
           done
 
@@ -180,6 +180,11 @@ jobs:
           node scripts/ci/scenario.mjs --scenario failure \
             --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
             --home "$RUNNER_TEMP/home-failure" --port 5404
+      - name: Scenario - a source with no conversation is refused, not imported as a shell
+        run: |
+          node scripts/ci/scenario.mjs --scenario empty \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-empty" --port 5409 --fixtures "$PWD/test/fixtures"
       - name: Scenario - re-importing does not duplicate messages
         run: |
           node scripts/ci/scenario.mjs --scenario reimport \
