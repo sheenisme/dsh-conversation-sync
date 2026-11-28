@@ -1,4 +1,4 @@
-# Conversation sync — detail
+# Conversation sync — technical details
 
 ## Two headline features
 
@@ -244,7 +244,7 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 193 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 199 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`

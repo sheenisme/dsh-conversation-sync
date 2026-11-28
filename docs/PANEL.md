@@ -33,6 +33,21 @@ outline), **already bound** (green tint and a dot), and **bound more than once**
 several sources is allowed on purpose, because that is how two conversations get
 merged into one.
 
+Every bound row also carries the **binding id** of the pair it belongs to, so
+"which one is this linked to?" is answered on the row itself instead of by
+opening the table. Selecting a session on one side expands and highlights its
+counterpart on the other side automatically, even if that group was collapsed.
+
+Two switches in the header decide what the right tree lists, both remembered for
+the session:
+
+- **Archived sessions** — on by default. Codex keeps finished work in
+  `archived_sessions/`; those are real conversations, so they are shown unless
+  you switch them off.
+- **Compacted sessions** — off by default. A thread Codex has summarised keeps
+  only an encrypted payload, so there is nothing to import; hiding it by default
+  keeps the list to what can actually be paired.
+
 The right tree also carries a **New session on this machine** row inside every
 tool group. Sitting inside the group is what fixes the machine and the tool, so
 an impossible pair cannot be picked; the host then suggests a path inside that
@@ -113,9 +128,9 @@ Codex writes three kinds of rollout into the same directory:
 
 When Codex summarises a thread it replaces the body with an **encrypted**
 `compaction` payload and leaves three lines behind: metadata, that blob, and
-settings. Those files are listed but marked *no conversation (compacted)*, and
-they cannot be selected — so pairing can no longer fail with "no importable
-messages" after the fact. The machine header reports both counts, which is why
+settings. Those files are hidden by default (the **compacted sessions** switch
+reveals them), and even then they cannot be selected — so pairing can no longer
+fail with "no importable messages" after the fact. The machine header reports both counts, which is why
 the number of rows you can click can be smaller than the number of files on disk.
 
 Titles are also read from *deep* inside a file when necessary: Codex writes the

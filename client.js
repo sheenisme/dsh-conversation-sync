@@ -109,11 +109,22 @@ window.__ModuleLoader__.load({
 .cs-item.bound .cs-itemTitle{color:var(--dsw-alias-label-secondary)}
 .cs-item.bound::before{content:'';position:absolute;left:6px;top:50%;width:4px;height:4px;margin-top:-2px;
   border-radius:999px;background:var(--dsw-alias-state-success-primary)}
+/* The counterpart of the current selection on the OTHER side: ringed so the
+   user can see which conversation this one is wired to, without reading paths. */
+.cs-item.linked{background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 11%,transparent);
+  box-shadow:inset 0 0 0 1px var(--dsw-alias-state-business-primary)}
+.cs-item.linked .cs-itemTitle{color:var(--dsw-alias-label-primary)}
 .cs-item{position:relative}
 .cs-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:16px;padding:0 4px;
   border-radius:999px;font-size:10px;line-height:16px;font-weight:600;
   color:var(--dsw-alias-state-success-primary);
   background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
+/* Short binding id printed next to a bound row, so "who is bound to whom" is
+   visible on both sides of the panel, not only in the table below. */
+.cs-rowId{display:inline-flex;align-items:center;flex:0 0 auto;height:15px;padding:0 4px;
+  border-radius:var(--dsw-radius-xs);font-family:var(--ds-font-family-code,monospace);
+  font-size:9.5px;line-height:15px;color:var(--dsw-alias-state-success-primary);
+  background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent)}
 .cs-itemMain{flex:1 1 auto;min-width:0}
 .cs-itemTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:18px}
 .cs-itemMeta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;line-height:16px;
@@ -251,6 +262,13 @@ window.__ModuleLoader__.load({
       // looked like it held other people's work. Off by default; one click shows
       // everything.
       const [showAutomated, setShowAutomated] = useState(false)
+      // A compacted rollout (Codex replaced its body with an encrypted summary)
+      // hides by default: it cannot be imported and used to fill the list with
+      // rows that only produced errors. One click shows them, still marked.
+      const [showCompacted, setShowCompacted] = useState(false)
+      // Archived conversations are still real conversations, so they stay in
+      // the list by default; this switch lets a user focus on active threads.
+      const [showArchived, setShowArchived] = useState(true)
       const [keyValue, setKeyValue] = useState('')
       const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
@@ -299,6 +317,27 @@ window.__ModuleLoader__.load({
         bindings.filter(b => b.externalPath === sessionPath && b.machineId === machineId && (!kind || b.kind === kind))
       const toggleGroup = key => setOpenGroups(prev => ({ ...prev, [key]: prev[key] === false }))
 
+      // When one side of a binding is selected, the counterpart on the other
+      // side is marked so the pair is obvious. A selection can belong to more
+      // than one binding (a merge), so these are sets of ids.
+      const linkedDshIds = new Set()
+      for (const binding of bindings) {
+        const touchesLeft = left && left !== NEW_LEFT && binding.dshSessionIds?.includes(left)
+        const touchesRight = right && !right.__new && binding.externalPath === right.path && binding.machineId === right.machineId
+        if (touchesLeft || touchesRight) {
+          for (const id of binding.dshSessionIds ?? []) linkedDshIds.add(id)
+        }
+      }
+      const linkedExternalKeys = new Set()
+      for (const binding of bindings) {
+        const touchesLeft = left && left !== NEW_LEFT && binding.dshSessionIds?.includes(left)
+        const touchesRight = right && !right.__new && binding.externalPath === right.path && binding.machineId === right.machineId
+        if (touchesLeft || touchesRight) {
+          linkedExternalKeys.add(`${binding.machineId}:${binding.kind}:${binding.externalPath}`)
+        }
+      }
+      const externalKey = (machineId, kind, sessionPath) => `${machineId}:${kind}:${sessionPath}`
+
       // A row's `name` is the tool's own id (a UUID, or a rollout timestamp),
       // which tells a reader nothing. The card shows the title and the first
       // few lines instead, so two similar sessions can be told apart.
@@ -343,12 +382,38 @@ window.__ModuleLoader__.load({
         return groups
       }, [cache.dsh, cache.workspaces, t])
 
+      // Selecting one side reveals the counterpart's groups on the other side,
+      // even if the user had collapsed them. Derived from the current selection
+      // (not stored in openGroups) so it always matches the bindings on screen.
+      // Declared after leftTree because it reads the left group keys.
+      const forceOpen = new Set()
+      for (const binding of bindings) {
+        const touchesLeft = left && left !== NEW_LEFT && binding.dshSessionIds?.includes(left)
+        const touchesRight = right && !right.__new && binding.externalPath === right.path && binding.machineId === right.machineId
+        if (touchesLeft) {
+          forceOpen.add(`m:${binding.machineId}`)
+          if (binding.kind) forceOpen.add(`k:${binding.machineId}:${binding.kind}`)
+        }
+        if (touchesRight) {
+          for (const group of leftTree) {
+            if (group.rows.some(session => binding.dshSessionIds?.includes(session.id))) forceOpen.add(group.key)
+          }
+        }
+      }
+
       // RIGHT TREE: machine → tool → session.
       const rightTree = useMemo(() => {
         return machines.map(machine => {
           const sessions = cache.external?.[machine.id] ?? []
           const automated = session => session.threadSource === 'guardian_review' || session.threadSource === 'subagent'
-          const shown = sessions.filter(session => showAutomated || !automated(session))
+          // Three independent switches decide which rows are visible. A
+          // compacted stub hides by default (it cannot be imported), archived
+          // threads show by default, automated threads hide by default.
+          const visible = session =>
+            (showAutomated || !automated(session)) &&
+            (showArchived || !session.archived) &&
+            (showCompacted || !session.compacted)
+          const shown = sessions.filter(visible)
           const hidden = sessions.length - shown.length
           const byKind = new Map()
           for (const session of shown) {
@@ -367,7 +432,7 @@ window.__ModuleLoader__.load({
             kinds: [...byKind.entries()].map(([kind, rows]) => ({ kind, rows })),
           }
         })
-      }, [machines, cache.external, cache.errors, showAutomated])
+      }, [machines, cache.external, cache.errors, showAutomated, showArchived, showCompacted])
 
       const setPreference = async patch => {
         try {
@@ -537,7 +602,7 @@ window.__ModuleLoader__.load({
         if (loading) return [newRow, jsx('div', { className: 'cs-empty', children: t('panel.loading') })]
         if (!leftTree.length) return [newRow, jsx('div', { className: 'cs-empty', children: t('panel.noDsh') })]
         return [newRow, ...leftTree.map(group => {
-          const open = openGroups[group.key] !== false
+          const open = openGroups[group.key] !== false || forceOpen.has(group.key)
           return jsx(Group, {
             open,
             onToggle: () => toggleGroup(group.key),
@@ -547,10 +612,11 @@ window.__ModuleLoader__.load({
               children: group.rows.map(session => {
                 const boundTo = boundDsh(session.id)
                 const selected = left === session.id
-                // Three states, because they answer three different questions:
-                // "is this the one I am about to use", "is it already wired up",
-                // and "is it wired up but not what I picked".
-                const state = selected ? 'sel' : boundTo.length ? 'bound' : ''
+                // Four states: the current selection, the counterpart of a
+                // selection on the other side, an ordinary bound row, and an
+                // unbound one. The linked ring answers "who is this wired to".
+                const linked = linkedDshIds.has(session.id) && !selected
+                const state = selected ? 'sel' : linked ? 'linked' : boundTo.length ? 'bound' : ''
                 return jsxs('div', {
                   className: `cs-item${state ? ` ${state}` : ''}`,
                   onClick: () => setLeft(selected ? '' : session.id),
@@ -562,6 +628,14 @@ window.__ModuleLoader__.load({
                     jsxs('div', { className: 'cs-itemMain', children: [
                       jsxs('div', { className: 'cs-itemTitle', children: [
                         titleOf(session),
+                        // One chip per binding id: a DSH session can be merged
+                        // with several external ones, and this is how a reader
+                        // matches the row to the table below.
+                        ...boundTo.map(b => jsx('span', {
+                          className: 'cs-rowId',
+                          title: `${t('panel.bindingId')}: ${b.id}`,
+                          children: shortId(b.id),
+                        }, b.id)),
                         boundTo.length > 1 ? jsx('span', { className: 'cs-badge', title: t('panel.multiBound'), children: `×${boundTo.length}` }) : null,
                       ] }),
                       jsxs('div', { className: 'cs-itemMeta', children: [
@@ -582,7 +656,7 @@ window.__ModuleLoader__.load({
         if (!rightTree.length) return jsx('div', { className: 'cs-empty', children: t('panel.noExternal') })
         return rightTree.map(({ machine, total, stubs, hidden, errors, kinds }) => {
           const machineKey = `m:${machine.id}`
-          const machineOpen = openGroups[machineKey] !== false
+          const machineOpen = openGroups[machineKey] !== false || forceOpen.has(machineKey)
           const isSsh = machine.kind === 'ssh'
           return jsxs('div', {
             children: [
@@ -637,7 +711,7 @@ window.__ModuleLoader__.load({
                     }) : null,
                     ...kinds.map(({ kind, rows }) => {
                       const kindKey = `k:${machine.id}:${kind}`
-                      const kindOpen = openGroups[kindKey] !== false
+                      const kindOpen = openGroups[kindKey] !== false || forceOpen.has(kindKey)
                       return jsx(Group, {
                         open: kindOpen,
                         onToggle: () => toggleGroup(kindKey),
@@ -666,7 +740,8 @@ window.__ModuleLoader__.load({
                             ...rows.map(session => {
                             const selected = right?.machineId === machine.id && right?.path === session.path && right?.kind === kind
                             const boundTo = boundExternal(machine.id, session.path, kind)
-                            const state = selected ? 'sel' : boundTo.length ? 'bound' : ''
+                            const linked = linkedExternalKeys.has(externalKey(machine.id, kind, session.path)) && !selected
+                            const state = selected ? 'sel' : linked ? 'linked' : boundTo.length ? 'bound' : ''
                             // A stub cannot be imported, so selecting it would only
                             // produce an error on pairing. It stays visible (and
                             // labelled) so the count is explainable, not clickable.
@@ -683,6 +758,11 @@ window.__ModuleLoader__.load({
                                 jsxs('div', { className: 'cs-itemMain', children: [
                                   jsxs('div', { className: 'cs-itemTitle', children: [
                                     titleOf(session),
+                                    ...boundTo.map(b => jsx('span', {
+                                      className: 'cs-rowId',
+                                      title: `${t('panel.bindingId')}: ${b.id}`,
+                                      children: shortId(b.id),
+                                    }, b.id)),
                                     boundTo.length > 1 ? jsx('span', { className: 'cs-badge', title: t('panel.multiBound'), children: `×${boundTo.length}` }) : null,
                                   ] }),
                                   jsxs('div', { className: 'cs-itemMeta', children: [
@@ -852,6 +932,22 @@ window.__ModuleLoader__.load({
               onChange: e => setShowAutomated(e.target.checked),
             }),
             t('panel.showAutomated'),
+          ] }),
+          jsxs('label', { className: 'cs-check', title: t('panel.showArchivedHint'), children: [
+            jsx('input', {
+              type: 'checkbox',
+              checked: showArchived,
+              onChange: e => setShowArchived(e.target.checked),
+            }),
+            t('panel.showArchived'),
+          ] }),
+          jsxs('label', { className: 'cs-check', title: t('panel.showCompactedHint'), children: [
+            jsx('input', {
+              type: 'checkbox',
+              checked: showCompacted,
+              onChange: e => setShowCompacted(e.target.checked),
+            }),
+            t('panel.showCompacted'),
           ] }),
           jsx('span', { className: 'cs-spacer' }),
           jsx('button', {
@@ -1065,6 +1161,11 @@ window.__ModuleLoader__.load({
       'panel.showAutomated': 'automated threads',
       'panel.showAutomatedHint': 'Also list threads Codex created for itself: guardian reviews and subagent workers. They hold real text but are not conversations you started.',
       'panel.hiddenAutomated': '{count} automated thread(s) hidden',
+      'panel.showArchived': 'archived sessions',
+      'panel.showArchivedHint': 'Codex moves archived threads to archived_sessions. They are still real conversations, so they show by default.',
+      'panel.showCompacted': 'compacted rollouts',
+      'panel.showCompactedHint': 'A compacted rollout has its body replaced by an encrypted summary and cannot be imported. Hidden by default; tick to see them.',
+      'panel.bindingId': 'Binding',
       'panel.noPreview': 'No readable text yet.',
       'panel.kinds.claude': 'Claude Code',
       'panel.kinds.codex': 'Codex CLI',
@@ -1161,6 +1262,11 @@ window.__ModuleLoader__.load({
       'panel.showAutomated': '自动线程',
       'panel.showAutomatedHint': '同时列出 Codex 自己创建的线程：guardian 评审和子代理。它们有真实内容，但不是你发起的对话。',
       'panel.hiddenAutomated': '已隐藏 {count} 个自动线程',
+      'panel.showArchived': '已归档会话',
+      'panel.showArchivedHint': 'Codex 会把归档线程移到 archived_sessions。它们仍是真实对话，因此默认显示。',
+      'panel.showCompacted': '已压缩会话',
+      'panel.showCompactedHint': '已压缩的 rollout 正文被加密摘要替换，无法导入。默认隐藏，勾选后可查看。',
+      'panel.bindingId': '绑定',
       'panel.noPreview': '暂时没有可读文本。',
       'panel.kinds.claude': 'Claude Code',
       'panel.kinds.codex': 'Codex CLI',

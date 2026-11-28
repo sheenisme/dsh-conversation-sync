@@ -1,11 +1,19 @@
+[English](README.md) · **中文**
+
 # dsh-conversation-sync
 
-[English README](README.md) · [界面详解](docs/UI.zh-CN.md) · [详细文档](docs/DETAIL.md)
+[![npm version](https://img.shields.io/npm/v/dsh-conversation-sync)](https://www.npmjs.com/package/dsh-conversation-sync)
+[![downloads](https://img.shields.io/npm/dw/dsh-conversation-sync)](https://www.npmjs.com/package/dsh-conversation-sync)
+[![downloads](https://img.shields.io/npm/dm/dsh-conversation-sync)](https://www.npmjs.com/package/dsh-conversation-sync)
+[![license](https://img.shields.io/github/license/sheenisme/dsh-conversation-sync)](https://github.com/sheenisme/dsh-conversation-sync/blob/main/LICENSE)
+[![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-7a3ef3)](https://github.com/topics/dsh-plugin)
+
+由 [@sheenisme](https://github.com/sheenisme) 维护 · [主页](https://github.com/sheenisme/dsh-conversation-sync) · [npm](https://www.npmjs.com/package/dsh-conversation-sync) · [Issue](https://github.com/sheenisme/dsh-conversation-sync/issues) · [English](README.md)
+
+![dsh-conversation-sync —— 对话来去自如，双向保持同步](docs/cover.png)
 
 把你在各种工具里的对话导入 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，
 并且**双向**保持同步——本机或通过 SSH 的远端机器都可以。
-
-![会话同步](docs/intro.png)
 
 **两个核心特性：**
 
@@ -71,9 +79,9 @@ OpenCode 和 DeepSeek 导出是**只导入**的：OpenCode 的会话在一个活
 npm test        # 单元测试，node:test，不需要网络也不需要 DSH
 ```
 
-193 个单元测试覆盖纯模块；CI 另外会把打包后的插件装进五个真实 DSH 版本，并通过十二个
+199 个单元测试覆盖纯模块；CI 另外会把打包后的插件装进五个真实 DSH 版本，并通过十二个
 场景驱动真实的 RPC 接口。每个 CI 任务证明了什么、如何在本地跑测试环境，见
-[docs/DETAIL.md](docs/DETAIL.md#testing)。
+[docs/TECHNICAL.zh-CN.md](docs/TECHNICAL.zh-CN.md#testing)。
 
 ## 许可证
 
@@ -89,7 +97,6 @@ npm test        # 单元测试，node:test，不需要网络也不需要 DSH
 - **[dsh-chat-import](https://github.com/Nwflower/dsh-chat-import)**（MIT）——通过
   `sessionPersistence` 物化会话的参考。
 - **[DeepSeek 余额小挂件](https://github.com/meteornox/deepseek-balance-whale-widget)** ——
-  封面图里的小鲸鱼。该仓库 `assets/` 下的美术素材为「原样提供」，**不在 MIT 覆盖范围内**；
-  此处原样使用并致谢，如作者要求会立即移除。
+  封面图里的小鲸鱼，其 `assets/` 素材为原样提供（见 [docs/ASSETS.zh-CN.md](docs/ASSETS.zh-CN.md)）；本插件免费且非商用，在此原样使用并致谢，如作者要求会立即移除。
 - **[dsh-plugin-cc](https://github.com/cpj-dev/dsh-plugin-cc)**（MIT）——bundle 结构与
   如何为 DSH 插件写测试的干净示例。

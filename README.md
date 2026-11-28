@@ -1,12 +1,20 @@
+[中文](README.zh-CN.md) · **English**
+
 # dsh-conversation-sync
 
-[中文 README](README.zh-CN.md) · [UI guide](docs/UI.md) · [Detailed docs](docs/DETAIL.md)
+[![npm version](https://img.shields.io/npm/v/dsh-conversation-sync)](https://www.npmjs.com/package/dsh-conversation-sync)
+[![downloads](https://img.shields.io/npm/dw/dsh-conversation-sync)](https://www.npmjs.com/package/dsh-conversation-sync)
+[![downloads](https://img.shields.io/npm/dm/dsh-conversation-sync)](https://www.npmjs.com/package/dsh-conversation-sync)
+[![license](https://img.shields.io/github/license/sheenisme/dsh-conversation-sync)](https://github.com/sheenisme/dsh-conversation-sync/blob/main/LICENSE)
+[![dsh-plugin](https://img.shields.io/badge/topic-dsh--plugin-7a3ef3)](https://github.com/topics/dsh-plugin)
+
+Maintained by [@sheenisme](https://github.com/sheenisme) · [Homepage](https://github.com/sheenisme/dsh-conversation-sync) · [npm](https://www.npmjs.com/package/dsh-conversation-sync) · [Issue](https://github.com/sheenisme/dsh-conversation-sync/issues) · [中文](README.zh-CN.md)
+
+![dsh-conversation-sync — conversations come and go, always in sync](docs/cover.png)
 
 Import conversations into [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 from the tools you already use — and keep them in sync **both ways**, locally or
 over SSH.
-
-![Conversation sync](docs/intro.png)
 
 **Two headline features:**
 
@@ -85,9 +93,9 @@ completely or not at all:
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-193 unit tests cover the pure modules; CI additionally installs the packed plugin
+199 unit tests cover the pure modules; CI additionally installs the packed plugin
 into five real DSH releases and drives the actual RPC surface through twelve
-scenarios. See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job
+scenarios. See [docs/TECHNICAL.md](docs/TECHNICAL.md#testing) for what each CI job
 proves and how to run the harness locally.
 
 ## License
@@ -106,9 +114,9 @@ proves and how to run the harness locally.
   hints.
 - **[dsh-chat-import](https://github.com/Nwflower/dsh-chat-import)** (MIT) — the
   reference for materializing sessions through `sessionPersistence`.
-- **[DeepSeek Balance Whale Widget](https://github.com/meteornox/deepseek-balance-whale-widget)** — the
-  small whale in the cover image. Its `assets/` art is provided as-is and is
-  **not** MIT-licensed; it is used here unmodified, with thanks, and will be
-  removed on request.
+- **[DeepSeek Balance Whale Widget](https://github.com/meteornox/deepseek-balance-whale-widget)** —
+  the little whale in the cover. Its `assets/` art is provided as-is (see
+  [docs/ASSETS.md](docs/ASSETS.md)); this free, non-commercial project uses it
+  unmodified, with credit, and will remove it on request.
 - **[dsh-plugin-cc](https://github.com/cpj-dev/dsh-plugin-cc)** (MIT) — a clean
   example of a bundle's shape and of how to test a DSH plugin.

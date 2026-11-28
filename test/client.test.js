@@ -210,3 +210,22 @@ test('client: a stub row cannot be selected, and the count says why', async () =
   assert.match(source, /stub \? undefined : \(\) => setRight/)
   assert.match(source, /panel\.stubs/)
 })
+
+test('client: compacted rows hide by default, archived rows show by default', async () => {
+  const { source } = await loadClient()
+  assert.match(source, /useState\(false\)[\s\S]*showCompacted/, 'showCompacted starts false')
+  assert.match(source, /useState\(true\)[\s\S]*showArchived/, 'showArchived starts true')
+  assert.match(source, /showCompacted \|\| !session\.compacted/)
+  assert.match(source, /showArchived \|\| !session\.archived/)
+})
+
+test('client: a bound row shows the binding id, and its counterpart is highlighted', async () => {
+  const { source } = await loadClient()
+  // The short id chip appears on both sides, and selecting one side marks the
+  // counterpart on the other via the linked class / forceOpen groups.
+  assert.match(source, /className: 'cs-rowId'/)
+  assert.match(source, /linkedDshIds/)
+  assert.match(source, /linkedExternalKeys/)
+  assert.match(source, /forceOpen/)
+  assert.match(source, /'linked'/)
+})

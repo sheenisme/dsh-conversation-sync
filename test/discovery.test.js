@@ -296,3 +296,108 @@ test('describe(): the first real prompt can sit megabytes into the file', async 
   const row = result.sessions.find(session => session.path === file)
   assert.equal(row.title, 'Deep prompt found.')
 })
+
+test('scanMachine(): archived Codex sessions are flagged, normal sessions are not', async () => {
+  // Codex MOVES a rollout into .codex/archived_sessions when the user archives
+  // it; the UI needs `archived` to offer an "include archived" toggle.
+  const home = '/home/tester'
+  const body = [
+    JSON.stringify({ type: 'session_meta', payload: { session_id: 'arch-1' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'archived conversation' }] } }),
+  ].join('\n') + '\n'
+  const t = memoryTransport({
+    [`${home}/.codex/archived_sessions/2026/archived.jsonl`]: body,
+    [`${home}/.codex/sessions/2026/01/01/normal.jsonl`]: body,
+  })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport: t, home })
+  const archived = sessions.find(s => s.path.includes('archived_sessions'))
+  const normal = sessions.find(s => s.path.includes('/sessions/') && !s.path.includes('archived'))
+  assert.ok(archived, 'archived session is listed')
+  assert.equal(archived.archived, true, 'archived root marks the row')
+  assert.equal(normal.archived, false, 'normal sessions root does not')
+})
+
+test('scanMachine(): a three-line compaction stub is compacted, a readable thread is not', async () => {
+  // A summarised-away Codex thread is a stub (metadata + ENCRYPTED compaction +
+  // settings): compaction evidence with NO importable conversation. A thread
+  // that merely had a compaction event but still holds messages is readable and
+  // must not be hidden by the UI.
+  const home = '/home/tester'
+  const stub = [
+    JSON.stringify({ type: 'session_meta', payload: { session_id: 'stub-1' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'compaction', encrypted_content: 'gAAAA-encrypted' } }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'thread_settings_applied' } }),
+  ].join('\n') + '\n'
+  const readable = [
+    JSON.stringify({ type: 'session_meta', payload: { session_id: 'readable-1' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'compaction', encrypted_content: 'gAAAA-encrypted' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'still readable' }] } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'yes you are' }] } }),
+  ].join('\n') + '\n'
+  const t = memoryTransport({
+    [`${home}/.codex/sessions/stub.jsonl`]: stub,
+    [`${home}/.codex/sessions/readable.jsonl`]: readable,
+  })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport: t, home })
+  const stubRow = sessions.find(s => s.path.endsWith('stub.jsonl'))
+  const readableRow = sessions.find(s => s.path.endsWith('readable.jsonl'))
+  assert.equal(stubRow.importable, false)
+  assert.equal(stubRow.compacted, true, 'stub with compaction evidence and no messages is compacted')
+  assert.equal(readableRow.importable, true)
+  assert.equal(readableRow.compacted, false, 'a thread with a compaction event but real messages is NOT compacted')
+})
+
+test('scanMachine(): titles come from the adapter, not ad-hoc field parsing', async () => {
+  // TRAE records each user turn twice: `event_msg`/`user_message` is the real
+  // turn and a Codex-shaped `response_item` is only a replay echo. The adapter
+  // knows to prefer the former. Antigravity wraps user text in
+  // <USER_REQUEST> tags; the adapter strips the wrapper so the title is clean.
+  const home = '/home/tester'
+  const traeFile = `${home}/.trae/cli/rollout-trae.jsonl`
+  const antiFile = `${home}/.gemini/antigravity-cli/brain/sess-1/.system_generated/logs/transcript.jsonl`
+  const trae = [
+    JSON.stringify({ type: 'session_meta', payload: { session_id: 'trae-1' } }),
+    // The echoed response_item comes FIRST with a decoy title; it must be ignored.
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'ECHOED DECOY TITLE' }] } }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'Real TRAE user question' } }),
+  ].join('\n') + '\n'
+  const anti = [
+    JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', created_at: '2026-01-01T00:00:00Z', content: '<USER_REQUEST>\nPlease fix the Antigravity adapter\n<ADDITIONAL_METADATA>ignored</ADDITIONAL_METADATA>\n</USER_REQUEST>' }),
+  ].join('\n') + '\n'
+  // A remote-style transport with findFiles() is used because the local walk()
+  // skips dotted directories, and Antigravity's transcript lives under
+  // .system_generated/logs/ - exactly the shape findFiles() handles.
+  const base = memoryTransport({ [traeFile]: trae, [antiFile]: anti })
+  const t = {
+    ...base,
+    findFiles: async (dir, _depth, suffix) => {
+      const all = [...base._store.keys()]
+      return all.filter(f => f.startsWith(`${dir}/`) && f.endsWith(suffix))
+        .map(full => ({ path: full, name: full.split('/').pop(), isDirectory: false }))
+    },
+  }
+  const { sessions } = await scanMachine({ id: 'local' }, { transport: t, home })
+  const traeRow = sessions.find(s => s.path === traeFile)
+  const antiRow = sessions.find(s => s.path === antiFile)
+  assert.equal(traeRow.title, 'Real TRAE user question', 'title comes from event_msg/user_message, not the echo')
+  assert.equal(antiRow.title, 'Please fix the Antigravity adapter', 'title has the <USER_REQUEST> wrapper stripped')
+})
+
+test('scanMachine(): preview is longer than 400 characters when enough real text exists', async () => {
+  // Previews used to stop at 400 chars (6 lines x 160). With the cap raised to
+  // 700 chars and 10 excerpt lines, a session with enough real text shows more.
+  const home = '/home/tester'
+  const file = `${home}/.claude/projects/p/long-preview.jsonl`
+  const lines = []
+  for (let i = 0; i < 10; i++) {
+    const role = i % 2 === 0 ? 'user' : 'assistant'
+    lines.push(JSON.stringify({
+      type: role,
+      message: { role, content: [{ type: 'text', text: `${role === 'user' ? 'Question' : 'Answer'} ${i}: ${'x'.repeat(150)}` }] },
+    }))
+  }
+  const t = memoryTransport({ [file]: lines.join('\n') + '\n' })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport: t, home })
+  const row = sessions.find(s => s.path === file)
+  assert.ok(row.preview.length > 400, `expected a preview over 400 chars, got ${row.preview.length}`)
+})
