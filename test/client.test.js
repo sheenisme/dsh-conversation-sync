@@ -131,6 +131,30 @@ test('client: a session bound more than once is still visible and marked', async
   assert.match(source, /cs-badge/, 'more than one binding needs a count badge')
 })
 
+test('client: the two-sided choices are one segmented control, not two buttons', async () => {
+  // They differ only in what happens when both sides moved - a policy, not a
+  // different action - so they share one control and one Bind button.
+  assert.match(source, /cs-seg'/)
+  assert.match(source, /bothMode === 'both' \? ' on' : ''/)
+  assert.match(source, /bothMode === 'auto' \? ' on' : ''/)
+  assert.match(source, /setBothMode\('both'\)/)
+  assert.match(source, /setBothMode\('auto'\)/)
+  assert.match(source, /pair\(bothMode\)/)
+  // The four old buttons are gone: one action per direction, plus the control.
+  assert.doesNotMatch(source, /void pair\('both'\)/)
+  assert.doesNotMatch(source, /void pair\('auto'\)/)
+})
+
+test('client: the info bar shows the running host version and recent activity', async () => {
+  // A stale host is otherwise invisible: the client bundle reloads on refresh
+  // while the host keeps its old code until the app restarts.
+  assert.match(source, /rpc\('status'\)/)
+  assert.match(source, /status\.version/)
+  assert.match(source, /status\.activity/)
+  assert.match(source, /cs-logLine/)
+  assert.match(source, /cs-dot/)
+})
+
 test('client: both dictionaries carry the same keys, including the settings label', async () => {
   const { dictionaries } = await loadClient()
   const dict = dictionaries['conversation-sync']

@@ -147,6 +147,19 @@ export const Config = Schema.object({
     .description('Sync bindings that opt into autoSync whenever a change is detected.'),
 })
 
+/**
+ * What this build is, for the info bar. Read once: the value cannot change
+ * while the process runs, and a failed read must not stop the plugin.
+ */
+async function readOwnVersion() {
+  try {
+    const raw = await fs.readFile(new URL('./package.json', import.meta.url), 'utf8')
+    return JSON.parse(raw)?.version ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
 function dirOf(machine, filePath) {
   return machine?.kind === 'ssh' ? path.posix.dirname(filePath) : path.dirname(filePath)
 }
@@ -170,6 +183,19 @@ export async function apply(ctx, config = {}) {
 
   const dirty = new Set()
   const lastPoll = new Map()
+  // Recent activity, newest last. The info bar shows it so a click has a visible
+  // outcome even after a reload, and so a failure is not only in the console.
+  const ACTIVITY_LIMIT = 60
+  const activity = []
+  const note = (level, text) => {
+    const entry = { at: Date.now(), level, text: String(text ?? '') }
+    activity.push(entry)
+    if (activity.length > ACTIVITY_LIMIT) activity.splice(0, activity.length - ACTIVITY_LIMIT)
+    if (level === 'error') logger.warn?.(`[conversation-sync] ${entry.text}`)
+    return entry
+  }
+  const ownVersion = await readOwnVersion()
+  const startedAt = Date.now()
   const localTransport = new LocalTransport()
   const hostKeyGuard = createHostKeyGuard({
     file: path.join(ROOT, 'known_hosts.json'),
@@ -846,7 +872,18 @@ export async function apply(ctx, config = {}) {
 
     switch (action) {
       case 'status':
-        return Response.json({ ready: !!bindingsTable, syncing, scanning, bindings: bindingsTable ? allBindings().length : 0 })
+        return Response.json({
+          ready: !!bindingsTable,
+          syncing,
+          scanning,
+          bindings: bindingsTable ? allBindings().length : 0,
+          // The info bar: which build is running, when it started, and what has
+          // happened since. Without the version a stale host is invisible — the
+          // client bundle reloads while the host keeps its old code.
+          version: ownVersion,
+          startedAt,
+          activity: activity.slice(-20),
+        })
 
       case 'machines':
         // Re-read ~/.ssh/config on demand: a host added to it should show up
@@ -981,6 +1018,9 @@ export async function apply(ctx, config = {}) {
         const state = getState(binding.id)
         await saveState(state)
         const result = await syncBinding(binding, true)
+        if (result?.error) note('error', `${binding.name}: ${result.error}`)
+        else if (result?.skipped) note('info', `${binding.name}: nothing changed, skipped`)
+        else note('ok', `${binding.name}: imported ${result?.imported ?? 0}, wrote ${result?.written ?? 0} (${result?.direction ?? 'in'})`)
         // A pairing that produced nothing is not a binding the user wants to
         // keep: leave it out of the list so a failed first sync does not add a
         // dead row that has to be removed by hand.
@@ -1029,9 +1069,11 @@ export async function apply(ctx, config = {}) {
 
       case 'unbind': {
         const id = String(body.id ?? '')
+        const removed = getBinding(id)
         await bindingsTable.delete(id)
         await statesTable.delete(id)
         dirty.delete(id)
+        note('info', `removed the binding for ${removed?.name ?? id}`)
         return Response.json({ ok: true })
       }
 
@@ -1039,9 +1081,21 @@ export async function apply(ctx, config = {}) {
         if (body.id) {
           const binding = getBinding(String(body.id))
           if (!binding) return Response.json({ error: 'binding not found' }, { status: 404 })
-          return Response.json({ results: [await syncBinding(binding, true, body.direction)] })
+          const result = await syncBinding(binding, true, body.direction)
+          if (result?.error) note('error', `${binding.name}: ${result.error}`)
+          else if (result?.skipped) note('info', `${binding.name}: nothing changed, skipped`)
+          else note('ok', `${binding.name}: imported ${result?.imported ?? 0}, wrote ${result?.written ?? 0} (${result?.direction ?? 'in'})`)
+          return Response.json({ results: [result] })
         }
-        return Response.json({ results: await syncAll(true, body.direction) })
+        const results = await syncAll(true, body.direction)
+        // One line for the batch rather than one per binding: a batch is a
+        // single action from the user's point of view.
+        const failed = results.filter(entry => entry?.error).length
+        const imported = results.reduce((sum, entry) => sum + (entry?.imported ?? 0), 0)
+        const written = results.reduce((sum, entry) => sum + (entry?.written ?? 0), 0)
+        note(failed ? 'error' : 'ok',
+          `synced ${results.length} binding(s): imported ${imported}, wrote ${written}${failed ? `, ${failed} failed` : ''}`)
+        return Response.json({ results })
       }
 
       default:

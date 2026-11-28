@@ -35,12 +35,45 @@ window.__ModuleLoader__.load({
     // literal colour would not follow the theme at all.
     const CSS = `
 .cs-root{display:flex;flex-direction:column;gap:14px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
+/* The info bar sits above everything and never moves: it answers "which build
+   is this, and what just happened". Borrowed from Apple's status strips - a
+   quiet surface, a coloured dot, and the facts in one line. */
+.cs-info{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:9px 12px;
+  border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);
+  border:.5px solid var(--dsw-alias-border-l1);font-size:11px;line-height:16px;
+  color:var(--dsw-alias-label-tertiary)}
+.cs-dot{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:var(--dsw-alias-state-success-primary)}
+.cs-dot.busy{background:var(--dsw-alias-state-business-primary);animation:cs-pulse 1.4s var(--ds-ease-in-out) infinite}
+.cs-dot.error{background:var(--dsw-alias-state-error-primary)}
+@keyframes cs-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.cs-infoText{font-weight:500;color:var(--dsw-alias-label-secondary)}
+.cs-infoSep{opacity:.35}
+.cs-infoLog{display:flex;flex-direction:column;gap:1px;width:100%;margin-top:2px}
+.cs-logLine{display:flex;gap:8px;align-items:baseline;font-size:11px;line-height:16px;
+  color:var(--dsw-alias-label-tertiary)}
+.cs-logTime{flex:0 0 auto;font-variant-numeric:tabular-nums;opacity:.7}
+.cs-logText{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-logLine.ok .cs-logText{color:var(--dsw-alias-label-secondary)}
+.cs-logLine.error .cs-logText{color:var(--dsw-alias-state-error-primary)}
 .cs-head{display:flex;flex-direction:column;gap:4px}
 .cs-title{display:flex;align-items:center;gap:8px;margin:0;font-size:16px;font-weight:600;line-height:24px}
 .cs-sub{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .cs-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 /* A framed group so it is clear the buttons inside act on the two selections
    above and on nothing else. */
+/* A segmented control: one control, two choices, the selected half raised.
+   Apple's segmented control, not two buttons that look unrelated. */
+.cs-seg{display:inline-flex;padding:2px;gap:2px;border-radius:var(--dsw-radius-sm);
+  background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2)}
+.cs-segBtn{height:26px;padding:0 10px;font:inherit;font-size:12px;line-height:18px;cursor:pointer;
+  color:var(--dsw-alias-label-secondary);background:transparent;border:none;
+  border-radius:calc(var(--dsw-radius-sm) - 2px);transition:background var(--ds-transition-duration) var(--ds-ease-in-out),
+  color var(--ds-transition-duration) var(--ds-ease-in-out)}
+.cs-segBtn:hover:not(:disabled):not(.on){color:var(--dsw-alias-label-primary);
+  background:var(--dsw-alias-interactive-bg-hover)}
+.cs-segBtn.on{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);
+  box-shadow:var(--dsw-shadow-lv1);font-weight:500}
+.cs-segBtn:disabled{opacity:.45;cursor:not-allowed}
 .cs-actionBar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;
   border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);
   background:var(--dsw-alias-bg-layer-3)}
@@ -51,7 +84,12 @@ window.__ModuleLoader__.load({
 .cs-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;height:28px;padding:0 10px;
   font:inherit;font-size:12px;line-height:18px;cursor:pointer;color:var(--dsw-alias-label-primary);
   background:transparent;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-sm)}
+.cs-btn{transition:background var(--ds-transition-duration) var(--ds-ease-in-out),
+  border-color var(--ds-transition-duration) var(--ds-ease-in-out),
+  color var(--ds-transition-duration) var(--ds-ease-in-out)}
 .cs-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.cs-btn:focus-visible{outline:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--dsw-alias-state-business-primary) 35%,transparent)}
+.cs-btn.primary:focus-visible{box-shadow:0 0 0 2px color-mix(in srgb,var(--dsw-alias-brand-primary) 30%,transparent)}
 .cs-btn:disabled{opacity:.4;cursor:not-allowed}
 .cs-btn.primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);border-color:transparent}
 .cs-btn.primary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover)}
@@ -162,6 +200,7 @@ window.__ModuleLoader__.load({
     // new-session target — so there is always something on the left to choose.
     const NEW_LEFT = '__new__'
 
+    const format = (template, values) => String(template).replace(/\{(\w+)\}/g, (match, key) => values?.[key] ?? match)
     const titleOf = item => item?.title || item?.name || item?.id || '—'
     const shortId = id => String(id ?? '').length > 18 ? `${String(id).slice(0, 12)}…${String(id).slice(-4)}` : String(id ?? '')
 
@@ -208,15 +247,21 @@ window.__ModuleLoader__.load({
       // made the panel look empty for the first seconds after it opened.
       const [loading, setLoading] = useState(true)
       const [prefs, setPrefs] = useState({ sidebarEntry: true, settingsEntry: true })
+      const [status, setStatus] = useState({})
+      // Which half of the two-sided segmented control the next pairing uses.
+      // Not a stored binding field: it only decides what the button does now.
+      const [bothMode, setBothMode] = useState('both')
 
       const load = useCallback(async (force = false) => {
         try {
-          const [m, sess, b, p] = await Promise.all([
+          const [m, sess, b, p, st] = await Promise.all([
             rpc('machines', force ? { refresh: true } : {}),
             rpc('sessions', { force }),
             rpc('bindings'),
             rpc('preferences'),
+            rpc('status'),
           ])
+          setStatus(st ?? {})
           setMachines(m.machines ?? [])
           setMachineWarnings(m.warnings ?? [])
           setKeys(m.keys ?? {})
@@ -680,13 +725,38 @@ window.__ModuleLoader__.load({
         jsx('div', { children: `${t('panel.selectedRight')}: ${right ? (right.__new === true ? `${t('panel.newExternal')} · ${t(`panel.kinds.${right.kind}`)}` : titleOf(right)) : t('panel.none')}` }),
       ] })
 
+      // The status strip: version, uptime, current activity, then the recent
+      // log lines. The dot carries the state so it reads at a glance.
+      const latest = [...(status.activity ?? [])].reverse().find(entry => entry.level !== 'info') ?? status.activity?.[status.activity?.length - 1]
+      const dotClass = `cs-dot${busy || status.syncing || status.scanning ? ' busy' : latest?.level === 'error' ? ' error' : ''}`
+      const activityText = busy ? t('panel.working')
+        : status.syncing ? t('panel.syncing')
+          : status.scanning ? t('panel.scanning')
+            : latest ? latest.text
+              : t('panel.idle')
+      const started = status.startedAt ? new Date(status.startedAt) : undefined
+      const infoBar = jsxs('div', { className: 'cs-info', children: [
+        jsx('span', { className: dotClass }),
+        jsx('span', { className: 'cs-infoText', children: activityText }),
+        jsx('span', { className: 'cs-infoSep', children: '·' }),
+        jsx('span', { title: t('panel.versionHint'), children: `v${status.version ?? '—'}` }),
+        jsx('span', { className: 'cs-infoSep', children: '·' }),
+        jsx('span', { title: t('panel.uptimeHint'), children: started ? format(t('panel.uptime'), { when: started.toLocaleTimeString() }) : '—' }),
+        jsx('span', { className: 'cs-spacer' }),
+        ...((status.activity ?? []).slice(-4).reverse().map((entry, index) => jsxs('div', {
+          className: `cs-logLine ${entry.level}`,
+          children: [
+            jsx('span', { className: 'cs-logTime', children: new Date(entry.at).toLocaleTimeString() }),
+            jsx('span', { className: 'cs-logText', title: entry.text, children: entry.text }),
+          ],
+        }, `log${index}`))),
+      ] })
+
       return jsxs('div', { className: 'cs-root', children: [
+        infoBar,
+
         jsxs('div', { className: 'cs-head', children: [
-          jsxs('div', { className: 'cs-bar', children: [
-            jsx('h3', { className: 'cs-title', children: t('panel.title') }),
-            jsx('span', { className: 'cs-spacer' }),
-            jsx('button', { className: 'cs-btn', onClick: () => void load(true), disabled: busy, children: t('panel.refresh') }),
-          ] }),
+          jsx('h3', { className: 'cs-title', children: t('panel.title') }),
           jsx('p', { className: 'cs-sub', children: t('panel.subtitle') }),
         ] }),
 
@@ -708,6 +778,14 @@ window.__ModuleLoader__.load({
             }),
             t('panel.settingsEntry'),
           ] }),
+          jsx('span', { className: 'cs-spacer' }),
+          jsx('button', {
+            className: 'cs-btn',
+            onClick: () => void load(true),
+            disabled: busy,
+            title: t('panel.refreshHint'),
+            children: busy ? t('panel.working') : `↻ ${t('panel.refresh')}`,
+          }),
         ] }),
 
         error ? jsx('div', { className: 'cs-err', children: error }) : null,
@@ -761,19 +839,31 @@ window.__ModuleLoader__.load({
               onClick: () => void pair('out'),
               children: t('panel.export'),
             }),
+            // The two-sided choices are one control with two halves: they only
+            // differ in what happens when both sides moved, which is a policy,
+            // not a different action.
+            jsxs('div', { className: 'cs-seg', children: [
+              jsx('button', {
+                className: `cs-segBtn${bothMode === 'both' ? ' on' : ''}`,
+                disabled: busy || !left || !right,
+                title: t('panel.bothHint'),
+                onClick: () => setBothMode('both'),
+                children: t('panel.segCatchUp'),
+              }),
+              jsx('button', {
+                className: `cs-segBtn${bothMode === 'auto' ? ' on' : ''}`,
+                disabled: busy || !left || !right,
+                title: t('panel.autoPairHint'),
+                onClick: () => setBothMode('auto'),
+                children: t('panel.segNewer'),
+              }),
+            ] }),
             jsx('button', {
               className: 'cs-btn',
               disabled: busy || !left || !right,
-              title: t('panel.bothHint'),
-              onClick: () => void pair('both'),
-              children: t('panel.bidirectional'),
-            }),
-            jsx('button', {
-              className: 'cs-btn',
-              disabled: busy || !left || !right,
-              title: t('panel.autoPairHint'),
-              onClick: () => void pair('auto'),
-              children: t('panel.autoPair'),
+              title: bothMode === 'both' ? t('panel.bothHint') : t('panel.autoPairHint'),
+              onClick: () => void pair(bothMode),
+              children: `${t('panel.pairNow')} ⇄`,
             }),
           ] }),
         ] }),
@@ -813,6 +903,17 @@ window.__ModuleLoader__.load({
       'settings.nav': 'Conversation sync',
       'panel.title': 'Conversation sync',
       'panel.subtitle': 'Left: DSH sessions grouped by workspace. Right: machines, each tool, and its sessions. Select one on each side to bind them.',
+      'panel.working': 'Working…',
+      'panel.syncing': 'Syncing…',
+      'panel.scanning': 'Scanning machines…',
+      'panel.idle': 'Ready',
+      'panel.versionHint': 'Version of the running plugin host. If this is older than the installed package, restart the app.',
+      'panel.uptimeHint': 'When this plugin host started',
+      'panel.uptime': 'since {when}',
+      'panel.refreshHint': 'Re-read machines, sessions and bindings',
+      'panel.segCatchUp': 'Each side catches up',
+      'panel.segNewer': 'Newer copy wins',
+      'panel.pairNow': 'Bind',
       'panel.refresh': 'Refresh',
       'panel.noWorkspace': 'No workspace',
       'panel.newSession': 'New session',
@@ -891,6 +992,17 @@ window.__ModuleLoader__.load({
       'settings.nav': '会话同步',
       'panel.title': '会话同步',
       'panel.subtitle': '左侧：DSH 会话，按工作区分组。右侧：机器 → 工具 → 会话。左右各选一个即可建立绑定。',
+      'panel.working': '处理中……',
+      'panel.syncing': '正在同步……',
+      'panel.scanning': '正在扫描机器……',
+      'panel.idle': '就绪',
+      'panel.versionHint': '正在运行的插件宿主版本。如果比已安装的版本旧，请重启应用。',
+      'panel.uptimeHint': '这个插件宿主的启动时间',
+      'panel.uptime': '自 {when}',
+      'panel.refreshHint': '重新读取机器、会话与绑定',
+      'panel.segCatchUp': '两边互相补齐',
+      'panel.segNewer': '较新的覆盖较旧的',
+      'panel.pairNow': '绑定',
       'panel.refresh': '刷新',
       'panel.noWorkspace': '未归属工作区',
       'panel.newSession': '新建会话',

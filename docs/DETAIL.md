@@ -244,7 +244,7 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 172 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 174 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -343,6 +343,16 @@ run (the witness is its `lastSyncAt`, since pairing performs the first sync
 itself), re-checking puts it back and writes a non-empty file, and direction
 `auto` does nothing when nothing changed but imports as soon as the source is
 appended to.
+
+## The status strip exists to expose a stale host
+
+`{action:'status'}` reports `version`, `startedAt` and the last 20 activity
+entries. That is not decoration: the client bundle is re-served on every page
+reload while the host process keeps running its old code until the app restarts,
+so after an update the panel can call an action the host has never heard of
+(`unknown action: setBindingAll` was exactly this). Showing the running version
+makes the mismatch visible instead of mysterious, and every pairing, sync and
+removal now records a line, so a click has an outcome that survives a reload.
 
 ## Two two-sided directions, and why both exist
 

@@ -503,6 +503,16 @@ const scenarios = {
     assert(stored, `the binding disappeared: ${JSON.stringify(listed.bindings)}`)
     assert(stored.autoSync === false, `a new binding is automatic by default: ${JSON.stringify(stored)}`)
     assert(stored.checked !== false, `a new binding starts unchecked: ${JSON.stringify(stored)}`)
+
+    // The info bar needs a version and an activity trail: without them a stale
+    // host (client reloaded, host not restarted) is invisible, and a click has
+    // no visible outcome.
+    const status = await rpc({ action: 'status' })
+    assert(status.version && status.version !== 'unknown',
+      `the status must report the running plugin version: ${JSON.stringify(status)}`)
+    assert(Array.isArray(status.activity), `the status must carry an activity list: ${JSON.stringify(status)}`)
+    const pairNote = (status.activity ?? []).find(entry => /imported|wrote|skipped/i.test(entry.text))
+    assert(pairNote, `pairing must leave a line in the activity trail: ${JSON.stringify(status.activity)}`)
     assert(listed.comparisons?.[binding.id], 'the listing must say which side is newer')
 
     // Unchecking must stop a bulk run from touching it. Pairing itself performs

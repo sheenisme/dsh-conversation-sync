@@ -45,8 +45,11 @@ button never has to be decoded:
 | --- | --- |
 | **← Import into DSH** | Append the machine session into the selected DSH session. The machine file is not touched. |
 | **Export to machine →** | Append the DSH session into the selected machine file. DSH is not touched. |
-| **Both ways ⇄** | Both legs, always: each side catches up with what the other has and it does not. Running it twice adds nothing, because each leg keeps its own cursor and only appends. This is the merge choice. |
-| **Newer side wins ⤵** | Compare first, then write only the newer copy over the older one. Nothing happens when the two sides are already in step. |
+| **Each side catches up** ⇄ / **Newer copy wins** ⤵ (one segmented control) | The two-sided choice. *Catches up* runs both legs, always: each side receives what the other has and it does not, so running it twice adds nothing — this is the merge choice. *Newer copy wins* compares first and writes only the newer copy over the older one, doing nothing when the two are in step. |
+
+The two two-sided choices share **one segmented control plus a single Bind
+button**, because they differ only in what happens when both sides moved — a
+policy, not a different action.
 
 The group is framed and captioned because those four buttons act on the two
 selections above and on nothing else; they stay disabled until both exist.
@@ -78,6 +81,16 @@ that is ticked. Each row has:
 
 There is deliberately **no automatic background sync**: every sync here writes
 into another tool's live files, so it happens when you ask for it.
+
+### The strip at the top
+
+Above the trees sits a quiet status strip: a coloured dot (green ready, blue
+working, red after a failure), the running plugin **version**, when this host
+started, and the last few lines of activity — every pairing, sync and removal
+writes one. The version matters more than it looks: the browser half reloads on
+refresh while the host keeps its old code until the app restarts, so a version
+older than the package you installed is the reason a new action answers
+`unknown action`.
 
 ### Which side is newer?
 
@@ -193,7 +206,7 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-172 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+174 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics and file-level session restore, host
 keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
 transport, the one-folder migration, and the browser half through a stub module
