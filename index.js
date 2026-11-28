@@ -431,7 +431,11 @@ export async function apply(ctx, config = {}) {
       }
       if (messages.length) {
         state.outSeqs ??= {}
-        state.outSeqs[sessionId] = Math.max(fromSeq, ...messages.map(message => message.seq))
+        // Stored EXCLUSIVE (last seq + 1). readDshSessionMessages treats fromSeq
+        // as an inclusive start, so recording the last seq itself re-exported
+        // that one message on every subsequent sync - a "both" binding grew the
+        // file by one duplicate line each time it ran.
+        state.outSeqs[sessionId] = Math.max(fromSeq, ...messages.map(message => message.seq + 1))
       }
       written += messages.length
     }
@@ -930,6 +934,36 @@ export async function apply(ctx, config = {}) {
         await ctx.credentials.set(ref, value)
         externalCache.at = 0
         return Response.json({ ok: true, ref: refFor(machine) })
+      }
+
+      case 'suggestPath': {
+        // A brand-new external session needs a destination that does not exist
+        // yet. Each tool keeps its rollouts somewhere specific, so the default
+        // has to be derived from that tool's own layout - a generic "somewhere
+        // in your home directory" default would not be discovered afterwards.
+        const machineId = String(body.machineId ?? 'local')
+        const kind = String(body.kind ?? 'jsonl')
+        const machine = machineById(machineId)
+        if (!machine) return Response.json({ error: 'unknown machine' }, { status: 404 })
+        if (IMPORT_ONLY_KINDS.has(kind)) {
+          return Response.json({ error: `${kind} sessions cannot be created from DSH; import only` }, { status: 400 })
+        }
+        let home
+        try {
+          const transport = await pooledTransport(machine, undefined)
+          home = await transport.home()
+        } catch (error) {
+          return Response.json({ error: `cannot resolve the home directory: ${error?.message ?? error}` }, { status: 502 })
+        }
+        const join = machine.kind === 'ssh' ? path.posix.join : path.join
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+        const name = `dsh-${stamp}-${randomUUID().slice(0, 8)}.jsonl`
+        const dir = kind === 'claude' ? join(home, '.claude', 'projects', 'dsh-conversation-sync')
+          : kind === 'codex' ? join(home, '.codex', 'sessions', 'dsh-conversation-sync')
+            : kind === 'workbuddy' ? join(home, '.workbuddy', 'projects', 'dsh-conversation-sync')
+              : kind === 'trae' ? join(home, '.trae', 'cli', 'dsh-conversation-sync')
+                : join(home, '.dsh-conversation-sync', 'exports')
+        return Response.json({ path: join(dir, name), dir, kind })
       }
 
       case 'pair': {

@@ -304,22 +304,39 @@ window.__ModuleLoader__.load({
       // which DSH session to grow, and an export needs to know what to write.
       const pair = async direction => {
         if (!right) { setError(t('panel.pickRight')); return }
+        // A brand-new destination only makes sense when there is something to
+        // write into it, and only for an export leg.
+        if (right.__new === true && direction === 'in') {
+          setError(t('panel.newExternalNeedsExport'))
+          return
+        }
         if (!left) { setError(t('panel.pickLeft')); return }
         // The new-session target means "create the DSH side from this source";
         // any real selection means "write into that existing session".
         const targets = left === NEW_LEFT ? [] : [left]
         setBusy(true)
         try {
+          // A destination that does not exist yet: ask the host where this tool
+          // keeps its rollouts on that machine, so the file lands somewhere the
+          // next scan will find it.
+          let externalPath = right.path
+          let externalSessionId = right.kind === 'opencode' ? right.id : undefined
+          let dbPath = right.kind === 'opencode' ? (right.dbPath ?? right.path) : undefined
+          if (right.__new === true) {
+            const suggested = await rpc('suggestPath', { machineId: right.machineId, kind: right.kind })
+            externalPath = suggested.path
+            externalSessionId = undefined
+            dbPath = undefined
+          }
           // OpenCode sessions live inside one SQLite file: the file is the
           // external path and the row id is the session selector.
-          const opencode = right.kind === 'opencode'
           const result = await rpc('pair', {
             binding: {
               name: titleOf(right),
               machineId: right.machineId,
-              externalPath: opencode ? (right.dbPath ?? right.path) : right.path,
-              externalSessionId: opencode ? right.id : undefined,
-              dbPath: opencode ? (right.dbPath ?? right.path) : undefined,
+              externalPath,
+              externalSessionId,
+              dbPath,
               kind: right.kind,
               dshSessionIds: targets,
               direction,
@@ -367,11 +384,24 @@ window.__ModuleLoader__.load({
 
       // One round trip for the whole table. Toggling row by row would leave the
       // table half-updated if the user clicked twice quickly.
+      //
+      // The host half is newer than the browser half after an update - the
+      // client bundle is re-served on reload while the host process keeps
+      // running until the app restarts. So fall back to per-row updates instead
+      // of showing "unknown action: setBindingAll" to someone who has not
+      // restarted yet.
       const toggleAll = async () => {
         const next = !allChecked
         setBusy(true)
         try {
-          await rpc('setBindingAll', { checked: next })
+          try {
+            await rpc('setBindingAll', { checked: next })
+          } catch (e) {
+            if (!/unknown action/i.test(e.message)) throw e
+            for (const binding of bindings) {
+              if ((binding.checked !== false) !== next) await rpc('setBinding', { id: binding.id, checked: next })
+            }
+          }
           await load()
         } catch (e) { setError(e.message) } finally { setBusy(false) }
       }
@@ -522,7 +552,26 @@ window.__ModuleLoader__.load({
                         label: t(`panel.kinds.${kind}`),
                         count: rows.length,
                         children: jsx('div', {
-                          children: rows.map(session => {
+                          children: [
+                            // A destination that does not exist yet. It lives
+                            // inside this tool group on purpose: sitting here is
+                            // what fixes the machine and the tool, so the user
+                            // cannot pick an impossible pair.
+                            (() => {
+                              const isNew = right?.__new === true && right.machineId === machine.id && right.kind === kind
+                              return jsxs('div', {
+                                className: `cs-item${isNew ? ' sel' : ''}`,
+                                onClick: () => setRight(isNew ? null : { __new: true, machineId: machine.id, kind }),
+                                role: 'button',
+                                tabIndex: 0,
+                                onKeyDown: event => { if (event.key === 'Enter') setRight({ __new: true, machineId: machine.id, kind }) },
+                                children: [jsxs('div', { className: 'cs-itemMain', children: [
+                                  jsx('div', { className: 'cs-itemTitle', children: t('panel.newExternal') }),
+                                  jsx('div', { className: 'cs-itemMeta', children: t('panel.newExternalHint') }),
+                                ] })],
+                              }, 'new')
+                            })(),
+                            ...rows.map(session => {
                             const selected = right?.machineId === machine.id && right?.path === session.path && right?.kind === kind
                             const boundTo = boundExternal(machine.id, session.path, kind)
                             const state = selected ? 'sel' : boundTo.length ? 'bound' : ''
@@ -546,7 +595,8 @@ window.__ModuleLoader__.load({
                                 ] }),
                               ],
                             }, `${machine.id}:${kind}:${session.path}`)
-                          }),
+                            }),
+                          ],
                         }),
                       }, kindKey)
                     }),
@@ -567,7 +617,6 @@ window.__ModuleLoader__.load({
               jsx('th', { style: { width: 28 }, children: '' }),
               jsx('th', { children: t('panel.colBinding') }),
               jsx('th', { children: t('panel.colDirection') }),
-              jsx('th', { children: t('panel.colMode') }),
               jsx('th', { children: t('panel.colNewer') }),
               jsx('th', { children: t('panel.colActions') }),
             ] }) }),
@@ -598,20 +647,10 @@ window.__ModuleLoader__.load({
                     disabled: busy,
                     onChange: e => void updateBinding(binding.id, { direction: e.target.value }),
                     children: [
+                      jsx('option', { value: 'both', children: t('panel.dirBoth') }),
                       jsx('option', { value: 'auto', children: t('panel.dirAuto') }),
                       jsx('option', { value: 'in', children: t('panel.dirIn') }),
                       jsx('option', { value: 'out', children: t('panel.dirOut') }),
-                      jsx('option', { value: 'both', children: t('panel.dirBoth') }),
-                    ],
-                  }) }),
-                  jsx('td', { children: jsx('select', {
-                    className: 'cs-select',
-                    value: binding.autoSync ? 'auto' : 'manual',
-                    disabled: busy,
-                    onChange: e => void updateBinding(binding.id, { autoSync: e.target.value === 'auto' }),
-                    children: [
-                      jsx('option', { value: 'manual', children: t('panel.modeManual') }),
-                      jsx('option', { value: 'auto', children: t('panel.modeAuto') }),
                     ],
                   }) }),
                   jsx('td', { children: newerLabel(binding) }),
@@ -638,7 +677,7 @@ window.__ModuleLoader__.load({
 
       const selection = jsxs('div', { className: 'cs-note', children: [
         jsx('div', { children: `${t('panel.selectedLeft')}: ${left === NEW_LEFT ? t('panel.newSession') : left ? titleOf((cache.dsh ?? []).find(s => s.id === left)) : t('panel.none')}` }),
-        jsx('div', { children: `${t('panel.selectedRight')}: ${right ? titleOf(right) : t('panel.none')}` }),
+        jsx('div', { children: `${t('panel.selectedRight')}: ${right ? (right.__new === true ? `${t('panel.newExternal')} · ${t(`panel.kinds.${right.kind}`)}` : titleOf(right)) : t('panel.none')}` }),
       ] })
 
       return jsxs('div', { className: 'cs-root', children: [
@@ -801,15 +840,12 @@ window.__ModuleLoader__.load({
       'panel.bindings': 'Bindings',
       'panel.colBinding': 'Binding',
       'panel.colDirection': 'Direction',
-      'panel.colMode': 'Mode',
       'panel.colNewer': 'Newer side',
       'panel.colActions': 'Actions',
-      'panel.dirAuto': 'Auto (newer wins)',
-      'panel.dirIn': 'Import only',
-      'panel.dirOut': 'Export only',
-      'panel.dirBoth': 'Both ways',
-      'panel.modeManual': 'Manual',
-      'panel.modeAuto': 'Automatic',
+      'panel.dirAuto': 'Newer copy wins',
+      'panel.dirIn': 'Import into DSH only',
+      'panel.dirOut': 'Export to machine only',
+      'panel.dirBoth': 'Each side catches up',
       'panel.syncNow': 'Sync now',
       'panel.checkedHint': 'Only checked bindings sync',
       'panel.newerExternal': 'machine',
@@ -820,6 +856,9 @@ window.__ModuleLoader__.load({
       'panel.placement': 'Show this page in:',
       'panel.sidebarEntry': 'left sidebar',
       'panel.settingsEntry': 'Settings',
+      'panel.newExternal': 'New session on this machine',
+      'panel.newExternalHint': 'Pick the machine and the tool by picking this row inside its group',
+      'panel.newExternalNeedsExport': 'A new session starts empty, so it can only receive an export.',
       'panel.noDsh': 'No DSH sessions found.',
       'panel.noExternal': 'No sessions found on these machines. Set the SSH key and refresh.',
       'panel.noBindings': 'No bindings yet. Select a session on each side, then choose a direction.',
@@ -879,15 +918,12 @@ window.__ModuleLoader__.load({
       'panel.bindings': '同步绑定',
       'panel.colBinding': '绑定',
       'panel.colDirection': '方向',
-      'panel.colMode': '模式',
       'panel.colNewer': '较新一侧',
       'panel.colActions': '操作',
-      'panel.dirAuto': '自动（较新者优先）',
-      'panel.dirIn': '仅导入',
-      'panel.dirOut': '仅导出',
-      'panel.dirBoth': '双向',
-      'panel.modeManual': '手动',
-      'panel.modeAuto': '自动',
+      'panel.dirAuto': '较新的覆盖较旧的',
+      'panel.dirIn': '只导入到 DSH',
+      'panel.dirOut': '只导出到机器',
+      'panel.dirBoth': '两边互相补齐',
       'panel.syncNow': '立即同步',
       'panel.checkedHint': '只有勾选的绑定才会同步',
       'panel.newerExternal': '机器',
@@ -898,6 +934,9 @@ window.__ModuleLoader__.load({
       'panel.placement': '入口位置：',
       'panel.sidebarEntry': '左侧边栏',
       'panel.settingsEntry': '设置页',
+      'panel.newExternal': '在这台机器上新建会话',
+      'panel.newExternalHint': '在哪个工具下点它，就决定了机器和工具',
+      'panel.newExternalNeedsExport': '新建的会话是空的，只能接收导出。',
       'panel.noDsh': '未找到 DSH 会话。',
       'panel.noExternal': '这些机器上未找到会话。请配置 SSH 私钥后刷新。',
       'panel.noBindings': '还没有绑定。在左右两侧各选一个会话，再选择方向。',

@@ -443,6 +443,18 @@ const scenarios = {
     assert(exported.trim().length > 0, 'the "both" export is empty')
     log(`both ok: ${bothResult.imported ?? 0} imported, ${bothResult.written} written`)
 
+    // 5. "Both" means each side catches up, so running it again must be a
+    //    no-op rather than a loop: the export just written carries dshSyncId
+    //    markers, and importing them back must not duplicate anything.
+    const again = await rpc({ action: 'sync', id: bothResult.id })
+    const againResult = again.results?.[0] ?? again
+    assert(!againResult.error, `a repeated "both" sync failed: ${JSON.stringify(againResult)}`)
+    assert((againResult.imported ?? 0) === 0,
+      `a repeated "both" sync duplicated ${againResult.imported} record(s): ${JSON.stringify(againResult)}`)
+    assert((againResult.written ?? 0) === 0,
+      `a repeated "both" sync rewrote ${againResult.written} message(s): ${JSON.stringify(againResult)}`)
+    log('both ok: the second pass appended nothing on either side')
+
     return {
       preflight: refusedResult.failure.check,
       backups: blockedResult.failure.backupPaths.length,
@@ -575,11 +587,32 @@ const scenarios = {
       `the same DSH session should carry several bindings (merge), got ${onSameSession.length}`)
     log(`merge ok: ${onSameSession.length} bindings on one DSH session`)
 
+    // A brand-new destination: the host must suggest a path inside the tool's
+    // own rollout directory, and a "both" sync on it must export rather than
+    // fail trying to import from a file that does not exist yet.
+    const suggested = await rpc({ action: 'suggestPath', machineId: 'local', kind: 'claude' })
+    assert(suggested.path, `suggestPath returned no path: ${JSON.stringify(suggested)}`)
+    assert(suggested.path.endsWith('.jsonl'), `the suggested path is not a rollout file: ${suggested.path}`)
+    assert(suggested.path.includes('.claude'), `the suggested path is outside the tool's own layout: ${suggested.path}`)
+    const fresh = await rpc({
+      action: 'pair',
+      binding: {
+        machineId: 'local', externalPath: suggested.path, kind: 'claude',
+        direction: 'both', dshSessionIds: [row.id],
+      },
+    })
+    const freshResult = fresh.result ?? fresh
+    assert(!freshResult.error, `pairing a brand-new destination failed: ${JSON.stringify(freshResult)}`)
+    assert((freshResult.written ?? 0) > 0, `a brand-new destination received nothing: ${JSON.stringify(freshResult)}`)
+    await fs.access(suggested.path)
+    log(`bindings ok: new destination written to ${path.basename(suggested.path)}`)
+
     log(`bindings ok: manual default, checkbox gated, repeat auto was a no-op, edited source imported`)
     return {
       autoSync: stored.autoSync,
       checked: stored.checked,
       repeatAuto: autoResult.direction,
+      newPath: path.basename(suggested.path),
       mergeBindings: onSameSession.length,
       editedAuto: autoResult2.direction,
       newer: autoResult2.comparison.newer,

@@ -244,7 +244,7 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 171 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 172 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -343,6 +343,26 @@ run (the witness is its `lastSyncAt`, since pairing performs the first sync
 itself), re-checking puts it back and writes a non-empty file, and direction
 `auto` does nothing when nothing changed but imports as soon as the source is
 appended to.
+
+## Two two-sided directions, and why both exist
+
+`both` and `auto` answer different questions, which is why the panel offers both
+rather than one "bidirectional" switch:
+
+- **`both` — each side catches up.** Both legs always run. Each leg keeps its own
+  cursor (`state.dshSeqs` for the import, `state.outSeqs` for the export) and only
+  appends what the other side does not already have. Running it twice adds
+  nothing, so no comparison is needed or wanted.
+- **`auto` — the newer copy wins.** Only one leg runs, chosen by
+  `compareSides()`; when the two sides are in step the result is `none` and
+  nothing is written at all.
+
+A real bug lived here until a scenario caught it: `state.outSeqs[sessionId]` was
+recorded as the **last exported seq**, while `readDshSessionMessages({fromSeq})`
+treats `fromSeq` as an **inclusive** start. Every repeat sync therefore re-exported
+that one message, and a `both` binding grew its file by one duplicate line each
+time it ran. The cursor is now stored exclusive (`seq + 1`), and the `safety`
+scenario asserts that a second `both` pass imports 0 and writes 0.
 
 ## Why the sidebar entry needs a `key`
 

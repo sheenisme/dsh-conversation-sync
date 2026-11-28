@@ -45,8 +45,8 @@ button never has to be decoded:
 | --- | --- |
 | **← Import into DSH** | Append the machine session into the selected DSH session. The machine file is not touched. |
 | **Export to machine →** | Append the DSH session into the selected machine file. DSH is not touched. |
-| **Both ways ⇄** | Both legs, unless one side is clearly newer — then only that side is written. |
-| **Newer side wins ⤵** | Compare, then write only the newer side into the older. Nothing happens when they are in step. |
+| **Both ways ⇄** | Both legs, always: each side catches up with what the other has and it does not. Running it twice adds nothing, because each leg keeps its own cursor and only appends. This is the merge choice. |
+| **Newer side wins ⤵** | Compare first, then write only the newer copy over the older one. Nothing happens when the two sides are already in step. |
 
 The group is framed and captioned because those four buttons act on the two
 selections above and on nothing else; they stay disabled until both exist.
@@ -57,17 +57,27 @@ outline), **already bound** (green tint and a dot), and **bound more than once**
 several sources is allowed on purpose, because that is how two conversations get
 merged into one.
 
+The right tree also carries a **New session on this machine** row inside every
+tool group. Sitting inside the group is what fixes the machine and the tool, so
+an impossible pair cannot be picked; the host then suggests a path inside that
+tool's own rollout directory (`~/.claude/projects/dsh-conversation-sync/…` and so
+on) so the next scan finds the file. A destination that does not exist yet can
+only receive an export — there is nothing to import from it.
+
 Bindings are listed at the bottom. The header carries a **select-all** switch
 (one round trip, so a fast double click cannot leave the table half-updated), a
 count of `checked/total`, and **Sync checked** — the batch button for everything
 that is ticked. Each row has:
 
-- a **checkbox** — only checked bindings are synced, by a bulk run, by
-  **Sync checked**, or by the automatic poll;
-- a **direction** — `Auto` (the default for a new binding) or a pinned one;
-- a **mode** — **Manual** (the default) or Automatic;
+- a **checkbox** — only checked bindings are synced, by a bulk run or by
+  **Sync checked**;
+- a **direction** — `Each side catches up` (the default for a new binding), the
+  newer-wins comparison, or a pinned single leg;
 - the **newer side** at that moment, with the reason on hover;
 - **Sync now** (this row only) and **Remove**.
+
+There is deliberately **no automatic background sync**: every sync here writes
+into another tool's live files, so it happens when you ask for it.
 
 ### Which side is newer?
 
@@ -183,7 +193,7 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-171 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+172 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics and file-level session restore, host
 keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
 transport, the one-folder migration, and the browser half through a stub module

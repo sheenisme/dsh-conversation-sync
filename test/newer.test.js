@@ -173,12 +173,25 @@ test('resolveDirection(): auto takes the comparison', () => {
   assert.equal(resolveDirection('auto', { newer: 'unknown', direction: 'both' }), 'none')
 })
 
-test('resolveDirection(): both follows the newer side when the sides disagree', () => {
-  assert.equal(resolveDirection('both', { newer: 'external', direction: 'in' }), 'in')
-  assert.equal(resolveDirection('both', { newer: 'dsh', direction: 'out' }), 'out')
-  // When they agree, both legs are safe.
+test('resolveDirection(): both means both legs, always, and ignores the comparison', () => {
+  // "Both" is the catch-up-each-other choice: each leg only appends what the
+  // other side lacks, so it can never duplicate and needs no comparison.
+  assert.equal(resolveDirection('both', { newer: 'external', direction: 'in' }), 'both')
+  assert.equal(resolveDirection('both', { newer: 'dsh', direction: 'out' }), 'both')
   assert.equal(resolveDirection('both', { newer: 'equal', direction: 'both' }), 'both')
   assert.equal(resolveDirection('both', { newer: 'unknown', direction: 'both' }), 'both')
+})
+
+test('resolveDirection(): both skips a side that has nothing to give', () => {
+  // A brand-new destination has no source yet, so the import leg would fail the
+  // whole sync; the export leg is the only meaningful one.
+  const missing = compareSides({ externalMtimeMs: undefined, dshLastTime: 1_000, direction: 'both' })
+  assert.equal(resolveDirection('both', missing), 'out')
+  const empty = compareSides({ externalMtimeMs: NOW, externalSize: 0, dshLastTime: NOW, direction: 'both' })
+  assert.equal(resolveDirection('both', empty), 'out')
+  // A usable source keeps both legs.
+  const usable = compareSides({ externalMtimeMs: NOW, externalSize: 10, dshLastTime: NOW, direction: 'both' })
+  assert.equal(resolveDirection('both', usable), 'both')
 })
 
 test('resolveDirection(): an explicit one-sided choice is respected', () => {
