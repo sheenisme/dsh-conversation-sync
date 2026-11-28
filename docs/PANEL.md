@@ -35,8 +35,12 @@ merged into one.
 
 Every bound row also carries the **binding id** of the pair it belongs to, so
 "which one is this linked to?" is answered on the row itself instead of by
-opening the table. Selecting a session on one side expands and highlights its
-counterpart on the other side automatically, even if that group was collapsed.
+opening the table. Selecting a session on one side expands, highlights **and
+selects** its counterpart on the other side automatically, even if that group was
+collapsed — so the pair is ready for a sync without hunting for the other half.
+If the counterpart is hidden by a switch, that switch is turned on rather than
+silently doing nothing. A row with no importable conversation is only revealed:
+selecting it would let you start a sync that must fail.
 
 Two switches in the header decide what the right tree lists, both remembered for
 the session:
@@ -82,7 +86,9 @@ click cannot leave the table half-updated), a count of `checked/total`, and
 - a **direction** — `Each side catches up` (the default for a new binding), the
   newer-wins comparison, or a pinned single leg;
 - the **newer side** at that moment, with the reason on hover;
-- **Sync now** (this row only) and **Remove**.
+- **Sync now** (this row only) and **Remove**. Remove asks first, in the row it
+  belongs to — the button turns into **Remove** / **Cancel** — so nothing is
+destroyed by a single misclick and the question never blocks the rest of the app.
 
 There is deliberately **no automatic background sync**: every sync here writes
 into another tool's live files, so it happens when you ask for it.

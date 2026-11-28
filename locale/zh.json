@@ -2,55 +2,7 @@
   "meta": {
     "title": "会话同步",
     "description": "基于 ~/.ssh/config 自动发现本机与 Remote-SSH 机器（含跳板机），双向同步会话；支持导入 Claude Code、Codex CLI、通用 JSONL 和 DeepSeek 导出。",
-    "detail": "docs/DETAIL.md"
+    "detail": "docs/TECHNICAL.zh-CN.md"
   },
-  "summary": "会话同步",
-  "panel": {
-    "title": "会话同步 — 双向同步 + Remote-SSH",
-    "subtitle": "左侧：DSH 全部会话 · 右侧：各机器上的会话 · 选择方向进行同步",
-    "refresh": "刷新会话",
-    "machines": "机器（来自 ~/.ssh/config，跳板机也算）",
-    "jump": "跳板机",
-    "key": "SSH 私钥",
-    "keySet": "已配置",
-    "keyMissing": "未配置",
-    "setKey": "设置私钥路径",
-    "keyPath": "本机上的私钥文件路径（保存为 DSH 凭据）",
-    "dshColumn": "DSH 会话（当前安装）",
-    "externalColumn": "外部会话（当前机器）",
-    "import": "← 导入到 DSH",
-    "export": "导出到远端 →",
-    "bidirectional": "⇄ 双向同步",
-    "arrowsHint": "左右各选一个会话，再选择方向。只有一侧有的会话会先导入/导出，然后保持同步。",
-    "bindings": "生效中的同步绑定",
-    "bound": "已绑定：",
-    "externalOnly": "尚无 DSH 会话——先点“导入”创建，或先在左侧选中 DSH 会话再导出。",
-    "noDsh": "未找到 DSH 会话。",
-    "noExternal": "该机器上未找到会话。请配置 SSH 私钥后刷新。",
-    "noBindings": "还没有绑定。在上方选择两个会话并选择方向。",
-    "lastSync": "上次同步：",
-    "failure": "同步失败：",
-    "pickLeft": "请先在左侧选择一个 DSH 会话。",
-    "pickRight": "请先在右侧选择一个外部会话。",
-    "removeSource": "删除绑定",
-    "confirmRemove": "确定删除这个同步绑定？",
-    "cancel": "取消",
-    "save": "保存",
-    "kinds": {
-      "claude": "Claude Code",
-      "codex": "Codex CLI",
-      "jsonl": "通用 JSONL",
-      "deepseekExport": "DeepSeek 导出 ZIP",
-      "workbuddy": "WorkBuddy / CodeBuddy",
-      "trae": "TRAE",
-      "antigravity": "Antigravity",
-      "opencode": "OpenCode"
-    },
-    "warnings": {
-      "writeBack": "警告：写回会直接修改原工具的活跃文件。每次写入前都会备份，失败时自动回滚，但仍可能发生数据丢失。"
-    }
-  },
-  "settings": {
-    "nav": "会话同步"
-  }
+  "summary": "会话同步"
 }

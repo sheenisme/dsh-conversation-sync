@@ -6,13 +6,14 @@ import { z } from 'zod'
 import Schema from '@deepseek-ai/schemastery'
 import { LocalTransport, transportForMachine, previewKeyPath, keyRefFor, isValidKeyRef } from './lib/transports.js'
 import { createTransportPool, mapLimit } from './lib/pool.js'
-import { readJsonlDelta, renderExternalLine, parseDeepSeekExport } from './lib/adapters.js'
+import { readJsonlDelta, parseDeepSeekExport } from './lib/adapters.js'
+import { renderSessionLines, maxOrdinal } from './lib/native.js'
 import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
 import { createHostKeyGuard } from './lib/hostkey.js'
 import { scanMachine } from './lib/discovery.js'
 import { shortenTitle } from './lib/discovery.js'
-import { listDshSessions, readDshSessionMessages, readDshSessionTitle, dshSessionExists, countDshEvents, inspectDshLog } from './lib/dsh-sessions.js'
+import { listDshSessions, readDshSessionMessages, readDshSessionExchanges, readDshSessionTitle, readDshSessionCwd, dshSessionExists, countDshEvents, inspectDshLog } from './lib/dsh-sessions.js'
 import { compareSides, resolveDirection } from './lib/newer.js'
 import { SyncRollback, diagnoseFailure, preflight } from './lib/rollback.js'
 import { migrateIntoSyncWorkspace } from './lib/dsh-migrate.js'
@@ -459,6 +460,16 @@ export async function apply(ctx, config = {}) {
     let written = 0
     let content = ''
     let title
+    // Whether the target file already exists decides whether a rollout header
+    // (Codex `session_meta`) has to be written: appending a second one to a file
+    // that already has one corrupts the session for the tool.
+    const statBefore = await transport.stat(binding.externalPath)
+    const hadContent = !!statBefore && Number(statBefore.size) > 0
+    // Existing bytes are needed twice: to continue numbering a rollout and to
+    // append without rewriting the whole file.
+    const previous = statBefore ? (await transport.read(binding.externalPath)).toString('utf8') : ''
+    /** Highest ordinal already on disk, so an append never reuses a number. */
+    let ordinalOffset = maxOrdinal(previous)
     for (const sessionId of binding.dshSessionIds) {
       // A stale or mistyped session id used to read back as zero messages and
       // report a successful sync that wrote nothing. Fail with the reason.
@@ -468,32 +479,41 @@ export async function apply(ctx, config = {}) {
       // The title is part of the conversation, so it travels with the messages:
       // renamed in DSH, the next export carries the new name out.
       title ??= await readDshSessionTitle({ persistence, sessions: sessionStore, sessionId })
+      // Claude Code lines carry `cwd` and Codex writes it into the rollout
+      // header; without it the tool cannot reopen what we wrote.
+      const cwd = await readDshSessionCwd({ persistence, sessions: sessionStore, sessionId }) ?? SYNC_WORKSPACE_DIR
       const fromSeq = state.outSeqs?.[sessionId] ?? 0
-      const messages = await readDshSessionMessages({ persistence, sessions: sessionStore, sessionId, fromSeq, strict: true })
-      for (const message of messages) {
-        const text = String(message.text ?? '')
-        if (!text) continue
-        content += renderExternalLine(
-          binding.kind,
-          { role: message.role, text, ts: message.time },
-          `dsh:${sessionId}:${message.seq}`,
-          title,
-        )
-      }
-      if (messages.length) {
+      // Native export: each tool must receive ITS OWN line shape. A Claude Code
+      // file needs parentUuid chains and tool_use/tool_result blocks, a Codex
+      // rollout needs session_meta + ordinals + function_call items. Rendering
+      // one flat text line per message (what renderExternalLine does) makes the
+      // tool open a broken transcript, so ask for exchanges and use the native
+      // writer. Other stores keep their adapter renderer.
+      const exchanges = await readDshSessionExchanges({ persistence, sessions: sessionStore, sessionId, fromSeq, strict: true })
+      const usable = exchanges.filter(exchange => (exchange.role === 'tool' ? !!exchange.callId : !!String(exchange.text ?? '').trim() || (exchange.calls?.length ?? 0) > 0))
+      content += renderSessionLines(binding.kind, usable, {
+        sessionId,
+        title,
+        cwd,
+        // Codex/TRAE rollouts open with one session_meta row; a second export
+        // into the same file must not add another one.
+        withHeader: !hadContent && !content,
+        ordinalOffset,
+      })
+      // Keep the running numbering across several bound sessions in one file.
+      ordinalOffset = maxOrdinal(content) || ordinalOffset
+      if (exchanges.length) {
         state.outSeqs ??= {}
         // Stored EXCLUSIVE (last seq + 1). readDshSessionMessages treats fromSeq
         // as an inclusive start, so recording the last seq itself re-exported
         // that one message on every subsequent sync - a "both" binding grew the
         // file by one duplicate line each time it ran.
-        state.outSeqs[sessionId] = Math.max(fromSeq, ...messages.map(message => message.seq + 1))
+        state.outSeqs[sessionId] = Math.max(fromSeq, ...exchanges.map(exchange => exchange.seq + 1))
       }
-      written += messages.length
+      written += usable.length
     }
     if (!content) return { written: 0 }
-    const statBefore = await transport.stat(binding.externalPath)
     if (!statBefore) await transport.mkdir(dirOf(machine, binding.externalPath))
-    const previous = statBefore ? (await transport.read(binding.externalPath)).toString('utf8') : ''
     const next = previous + content
     await transport.write(binding.externalPath, next)
     const stat = await transport.stat(binding.externalPath)
@@ -641,6 +661,9 @@ export async function apply(ctx, config = {}) {
       state.lastFailure = undefined
       await saveState(state)
       dirty.delete(binding.id)
+      // Both sides just moved, so the cached newer-side answer is stale by
+      // construction — the next poll must re-read instead of reusing it.
+      comparisonCache.delete(binding.id)
       return { id: binding.id, imported, written, direction, configured, comparison }
     } catch (error) {
       const outcome = rollback
@@ -656,6 +679,7 @@ export async function apply(ctx, config = {}) {
       state.lastError = failure.reason
       state.lastFailure = failure
       await saveState(state)
+      comparisonCache.delete(binding.id)
       logger.warn?.(`[conversation-sync] ${binding.name}: ${failure.reason}`)
       // A failed sync often means the connection itself is gone; drop it so the
       // next attempt reconnects instead of retrying a dead socket forever.
@@ -704,6 +728,50 @@ export async function apply(ctx, config = {}) {
       lastSyncAt: state.lastSyncAt,
       direction: binding.direction,
     })
+  }
+
+  // How long a per-binding newer-side answer is reused. The panel refreshes
+  // bindings every few seconds; without this each refresh is a `stat` per
+  // binding over SSH, i.e. an idle open panel would hammer every remote host
+  // forever. Two seconds keeps the label live enough to feel immediate after a
+  // sync while making a poll cost nothing.
+  const COMPARISON_TTL_MS = 2000
+  const comparisonCache = new Map()
+
+  /**
+   * The newer-side comparison for one binding, cached and de-duplicated.
+   *
+   * `force` is used right after a write, where a stale answer would point the
+   * next sync in the wrong direction.
+   */
+  const comparisonFor = async (binding, force = false) => {
+    const key = binding.id
+    const cached = comparisonCache.get(key)
+    if (!force && cached) {
+      if (cached.pending) return cached.pending
+      if (Date.now() - cached.at < COMPARISON_TTL_MS) return cached.value
+    }
+    const machine = machineById(binding.machineId)
+    if (!machine) {
+      const value = { newer: 'unknown', direction: 'both', reason: 'the machine is no longer known' }
+      comparisonCache.set(key, { at: Date.now(), value })
+      return value
+    }
+    const pending = (async () => {
+      const transport = await pooledTransport(machine, binding.keyRef)
+      return await compareBindingSides(binding, getState(binding.id), transport)
+    })()
+    // Store the promise itself: callers arriving while the stat is in flight
+    // await the same round trip instead of starting another one.
+    comparisonCache.set(key, { at: Date.now(), pending })
+    try {
+      const value = await pending
+      comparisonCache.set(key, { at: Date.now(), value })
+      return value
+    } catch (error) {
+      comparisonCache.delete(key)
+      throw error
+    }
   }
 
   const syncAll = async (forced = false, direction) => {
@@ -949,13 +1017,19 @@ export async function apply(ctx, config = {}) {
         // Which side is newer, per binding, so the panel can say so before the
         // user presses anything. A failure here must not fail the listing: an
         // unreachable machine just reports no comparison.
+        //
+        // The panel polls this route, and each comparison costs one `stat` over
+        // the binding's transport — on SSH that is a network round trip per
+        // binding per poll. Results are therefore cached for COMPARISON_TTL_MS
+        // and concurrent callers share one in-flight computation, so a poll
+        // that arrives while an earlier one is still waiting on a slow host
+        // does not stack a second round trip on top of it.
         const comparisons = {}
         await Promise.all(list.map(async binding => {
           const machine = machineById(binding.machineId)
           if (!machine) return
           try {
-            const transport = await pooledTransport(machine, binding.keyRef)
-            comparisons[binding.id] = await compareBindingSides(binding, getState(binding.id), transport)
+            comparisons[binding.id] = await comparisonFor(binding)
           } catch {
             comparisons[binding.id] = { newer: 'unknown', direction: 'both', reason: 'the machine could not be reached' }
           }

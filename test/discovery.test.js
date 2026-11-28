@@ -217,6 +217,138 @@ test('describe(): text the tool injected in the user seat is not a title', async
   assert.equal(row.importable, true)
 })
 
+test('describe(): importability never depends on file size', async () => {
+  // THE BUG THIS LOCKS DOWN: `importable` used to be
+  // `whitelisted || (truncated && count > 3)` — a file was a conversation
+  // because it was BIGGER than the read window. Claude's rows are
+  // `{type:'user'}` / `{type:'assistant'}`, which the Codex-shaped whitelist
+  // never matched, so the size guess was the only thing keeping Claude
+  // sessions visible: every large rollout passed, and a real but SHORT Claude
+  // conversation was declared "no conversation" and hidden. 15 of 30 real
+  // Claude sessions on one machine were hidden that way.
+  //
+  // Both files below hold exactly one real exchange. One fits in the first
+  // read (small), the other is padded past it (large). Both must be importable,
+  // which can only be true if content decides.
+  const home = '/home/tester'
+  const exchange = [
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Short but real.' }] }, uuid: 'u1', sessionId: 'small-1' }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Answer.' }] }, uuid: 'u2', sessionId: 'small-1' }),
+  ].join('\n') + '\n'
+  // Same conversation, then 300 KB of bookkeeping lines to push it past CHUNK.
+  const padding = `${JSON.stringify({ type: 'queue-operation', operation: 'enqueue' })}\n`.repeat(6000)
+  const transport = memoryTransport({
+    [`${home}/.claude/projects/p/small.jsonl`]: exchange,
+    [`${home}/.claude/projects/p/large.jsonl`]: exchange + padding,
+  })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport, home })
+  const small = sessions.find(s => s.path.endsWith('small.jsonl'))
+  const large = sessions.find(s => s.path.endsWith('large.jsonl'))
+  assert.ok(small.size < 262144, 'the small file really is below the read window')
+  assert.ok(large.size > 262144, 'the large file really is above the read window')
+  assert.equal(small.importable, true, 'a short but real conversation IS importable')
+  assert.equal(large.importable, true, 'a padded real conversation is importable')
+  assert.equal(small.compacted, false, 'a short real conversation is not "compacted"')
+  assert.equal(small.title, 'Short but real.', 'its title still comes from the text')
+})
+
+test('describe(): an empty bookkeeping file is not importable at any size', async () => {
+  // The converse of the size bug: padding a file that holds no conversation
+  // must not make it look like one. Before, ANY file over the window was
+  // assumed to hold a conversation, so a large log of noise was listed as a
+  // session that could only fail on import.
+  const home = '/home/tester'
+  const noise = `${JSON.stringify({ type: 'queue-operation', operation: 'enqueue' })}\n`.repeat(6000)
+  const transport = memoryTransport({ [`${home}/.claude/projects/p/noise.jsonl`]: noise })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport, home })
+  const row = sessions.find(s => s.path.endsWith('noise.jsonl'))
+  assert.ok(row.size > 262144)
+  assert.equal(row.importable, false, 'size alone never makes a conversation')
+})
+
+test('scanMachine(): Antigravity transcripts are found even though the path has a dot directory', async () => {
+  // `walk()` skips dot-directories by default, and Antigravity keeps its
+  // transcript under `brain/<id>/.system_generated/logs/`. A LOCAL scan
+  // therefore found nothing at all, while an SSH scan (which asks `find`) did —
+  // the same machine looked different depending on how it was reached.
+  const home = '/home/tester'
+  const file = `${home}/.gemini/antigravity-cli/brain/abc/.system_generated/logs/transcript.jsonl`
+  const lines = [
+    JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: '<USER_REQUEST>\nFix the parser.\n</USER_REQUEST>' }),
+    JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', content: 'On it.' }),
+  ].join('\n') + '\n'
+  const transport = memoryTransport({ [file]: lines })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport, home })
+  assert.equal(sessions.length, 1, 'the dot-directory transcript is listed')
+  assert.equal(sessions[0].kind, 'antigravity')
+  assert.equal(sessions[0].importable, true)
+})
+
+test('scanMachine(): an Antigravity title-generator turn is marked as utility, a real one is not', async () => {
+  // Antigravity also runs one-shot helper calls ("Create a concise title for
+  // this session") through the same storage. They are transcripts but not
+  // conversations, so they carry the `utility` marker and hide by default.
+  const home = '/home/tester'
+  const dir = `${home}/.gemini/antigravity-cli/brain`
+  const utility = [
+    JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nSystem instructions:\nCreate a concise title…\n</USER_REQUEST>' }),
+    JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'A title' }),
+  ].join('\n') + '\n'
+  const real = [
+    JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nPlease fix the parser.\n</USER_REQUEST>' }),
+    JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', content: 'Sure.' }),
+  ].join('\n') + '\n'
+  const transport = memoryTransport({
+    [`${dir}/u1/.system_generated/logs/transcript.jsonl`]: utility,
+    [`${dir}/r1/.system_generated/logs/transcript.jsonl`]: real,
+  })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport, home })
+  const util = sessions.find(s => s.path.includes('/u1/'))
+  const genuine = sessions.find(s => s.path.includes('/r1/'))
+  assert.equal(util.threadSource, 'utility')
+  assert.equal(genuine.threadSource, '')
+})
+
+test('describe(): the title the tool recorded wins over the first prompt', async () => {
+  // Claude Code records the session's own name: `custom-title` when the user
+  // renames it, `ai-title` when it generates one. Before this, the scanner read
+  // neither and labelled every such session with its opening prompt, so the
+  // name the user actually knows never appeared.
+  const home = '/home/tester'
+  const lines = [
+    JSON.stringify({ type: 'custom-title', customTitle: 'SSH BAAI-Ascend', sessionId: 's1' }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'a long first question that is not the name' }] }, uuid: 'u1', sessionId: 's1' }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] }, uuid: 'u2', sessionId: 's1' }),
+  ].join('\n') + '\n'
+  const transport = memoryTransport({ [`${home}/.claude/projects/p/named.jsonl`]: lines })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport, home })
+  assert.equal(sessions[0].title, 'SSH BAAI-Ascend')
+})
+
+test('describe(): a generated title is used, and the newest prompt is only a stand-in', async () => {
+  const home = '/home/tester'
+  const withAi = [
+    JSON.stringify({ type: 'ai-title', aiTitle: 'FP64 register spec', sessionId: 's2' }),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'question' }] }, uuid: 'u1', sessionId: 's2' }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }, uuid: 'u2', sessionId: 's2' }),
+  ].join('\n') + '\n'
+  // No stored title and no user text at all: the last prompt is better than
+  // an empty row, but a real title must never lose to it.
+  const onlyPrompt = [
+    JSON.stringify({ type: 'last-prompt', lastPrompt: 'the newest question', sessionId: 's3' }),
+    JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] }, uuid: 'u2', sessionId: 's3' }),
+  ].join('\n') + '\n'
+  const transport = memoryTransport({
+    [`${home}/.claude/projects/p/ai.jsonl`]: withAi,
+    [`${home}/.claude/projects/p/prompt.jsonl`]: onlyPrompt,
+  })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport, home })
+  const ai = sessions.find(s => s.path.endsWith('ai.jsonl'))
+  const prompt = sessions.find(s => s.path.endsWith('prompt.jsonl'))
+  assert.equal(ai.title, 'FP64 register spec')
+  assert.equal(prompt.title, 'the newest question', 'a stored name outranks our guess')
+})
+
 test('describe(): a three-line stub is listed but marked not importable', async () => {
   // Twenty of sixty rollouts on a real machine were exactly this: metadata, an
   // ENCRYPTED compaction, settings. They cannot be imported, and offering them
@@ -345,6 +477,29 @@ test('scanMachine(): a three-line compaction stub is compacted, a readable threa
   assert.equal(stubRow.compacted, true, 'stub with compaction evidence and no messages is compacted')
   assert.equal(readableRow.importable, true)
   assert.equal(readableRow.compacted, false, 'a thread with a compaction event but real messages is NOT compacted')
+})
+
+test('scanMachine(): a stub is compacted even when the window never sees the marker', async () => {
+  // The real bug: a Codex `session_meta` line is ~19 KB, so the 8 KB head
+  // window ends INSIDE that single line and never reaches the `compaction`
+  // payload. Keying on "we saw a compaction marker" therefore reported
+  // `compacted: false` for a three-line stub, and the row stayed visible even
+  // with the compacted switch off. Emptiness is the honest signal.
+  const home = '/home/tester'
+  const huge = JSON.stringify({
+    type: 'session_meta',
+    payload: { session_id: 'huge-1', base_instructions: { text: 'x'.repeat(40_000) } },
+  })
+  const stub = [
+    huge,
+    JSON.stringify({ type: 'response_item', payload: { type: 'compaction', encrypted_content: 'gAAAA-encrypted' } }),
+    JSON.stringify({ type: 'event_msg', payload: { type: 'thread_settings_applied' } }),
+  ].join('\n') + '\n'
+  const t = memoryTransport({ [`${home}/.codex/sessions/huge.jsonl`]: stub })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport: t, home })
+  const row = sessions.find(s => s.path.endsWith('huge.jsonl'))
+  assert.equal(row.importable, false)
+  assert.equal(row.compacted, true, 'an empty stub is compacted even without visible compaction evidence')
 })
 
 test('scanMachine(): titles come from the adapter, not ad-hoc field parsing', async () => {

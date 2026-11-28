@@ -15,11 +15,15 @@ window.__ModuleLoader__.load({
   id: 'dsh-conversation-sync',
   factory: (require) => {
     const { jsx, jsxs } = require('react/jsx-runtime')
-    const { useCallback, useEffect, useMemo, useState } = require('react')
+    const { useCallback, useEffect, useMemo, useRef, useState } = require('react')
 
     const PKG = 'dsh-conversation-sync'
     const NS = 'conversation-sync'
-    const rpc = (action, extra = {}) => fetch('api/conversation-sync/rpc', {
+    // Root-absolute on purpose: the route is served at /api/conversation-sync/rpc
+    // (index.js), and every reference plugin registers an absolute path. A
+    // relative URL happens to work while the shell is mounted at "/" and 404s
+    // the moment the app is hosted under a path prefix.
+    const rpc = (action, extra = {}) => fetch('/api/conversation-sync/rpc', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action, ...extra }),
@@ -183,20 +187,24 @@ window.__ModuleLoader__.load({
 .cs-newer.external{color:var(--dsw-alias-state-warn-primary)}
 .cs-newer.dsh{color:var(--dsw-alias-state-business-primary)}
 .cs-newer.equal,.cs-newer.unknown{color:var(--dsw-alias-label-tertiary)}
+.cs-confirm{display:inline-flex;align-items:center;gap:6px;padding:2px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-module-platform)}
 .cs-scroll{overflow-x:auto}
 `
 
-    let styleApplied = false
+    // Returns its own disposal so the stylesheet leaves with the plugin. Without
+    // this the <style> node outlives a disable/reload and stale CSS keeps
+    // applying to the app.
     const applyStyle = () => {
-      if (styleApplied || typeof document === 'undefined') return
-      styleApplied = true
+      if (typeof document === 'undefined') return () => {}
       const id = `${PKG}/style`
-      if (document.querySelector(`style[data-plugin-css="${id}"]`)) return
+      const existing = document.querySelector(`style[data-plugin-css="${id}"]`)
+      if (existing) return () => existing.remove()
       const tag = document.createElement('style')
       tag.dataset.plugin = PKG
       tag.dataset.pluginCss = id
       tag.textContent = CSS
       document.head.appendChild(tag)
+      return () => tag.remove()
     }
 
     // Where the two entries live. Both are on by default; each toggle registers
@@ -279,8 +287,17 @@ window.__ModuleLoader__.load({
       const [loading, setLoading] = useState(true)
       const [prefs, setPrefs] = useState({ sidebarEntry: true, settingsEntry: true })
       const [status, setStatus] = useState({})
+      // Which binding is waiting for "remove?" confirmation. An inline row
+      // question instead of window.confirm, which blocks the whole app and
+      // cannot be styled or read out.
+      const [confirming, setConfirming] = useState('')
 
+      // Every call bumps the generation. A slow poll that resolves after the
+      // user pressed a button must not write its older snapshot over the fresher
+      // one, so a stale response is dropped instead of applied.
+      const loadGen = useRef(0)
       const load = useCallback(async (force = false) => {
+        const mine = ++loadGen.current
         try {
           const [m, sess, b, p, st] = await Promise.all([
             rpc('machines', force ? { refresh: true } : {}),
@@ -289,6 +306,7 @@ window.__ModuleLoader__.load({
             rpc('preferences'),
             rpc('status'),
           ])
+          if (mine !== loadGen.current) return
           setStatus(st ?? {})
           setMachines(m.machines ?? [])
           setMachineWarnings(m.warnings ?? [])
@@ -301,12 +319,24 @@ window.__ModuleLoader__.load({
           setError('')
           setLoading(false)
         } catch (e) {
+          if (mine !== loadGen.current) return
           // "not ready" resolves itself; anything else is a real error to show.
           if (!/not ready/i.test(e.message)) { setError(e.message); setLoading(false) }
         }
       }, [])
 
-      useEffect(() => { void load(); const id = setInterval(() => void load(), 5000); return () => clearInterval(id) }, [load])
+      // Poll, but never while the tab is hidden: a backgrounded panel used to
+      // keep asking the host for SSH round trips it could not even show.
+      useEffect(() => {
+        void load()
+        const id = setInterval(() => { if (typeof document === 'undefined' || !document.hidden) void load() }, 5000)
+        const onVisible = () => { if (typeof document !== 'undefined' && !document.hidden) void load() }
+        document.addEventListener?.('visibilitychange', onVisible)
+        return () => {
+          clearInterval(id)
+          document.removeEventListener?.('visibilitychange', onVisible)
+        }
+      }, [load])
 
       const stateFor = id => states.find(x => x.bindingId === id)
       // A session may be bound more than once on purpose: two sources bound to
@@ -337,6 +367,40 @@ window.__ModuleLoader__.load({
         }
       }
       const externalKey = (machineId, kind, sessionPath) => `${machineId}:${kind}:${sessionPath}`
+
+      // Selecting a DSH session selects its counterpart on the right. The ring
+      // (linkedExternalKeys) already showed the pair, and the groups already
+      // opened themselves, but the right-hand SELECTION stayed empty - so a
+      // click on the left told you "this is wired to something" without
+      // pointing at it. The reverse direction already worked because the right
+      // rows carry their own machineId.
+      //
+      // Only left-initiated: reacting to `right` too would fight the user's own
+      // pick (and loop), so it keys on `left` alone via a ref of the last value
+      // handled.
+      const lastAutoLeft = useRef('')
+      const rowFor = binding => {
+        const rows = cache.external?.[binding.machineId] ?? []
+        return rows.find(session => session.path === binding.externalPath && session.kind === binding.kind)
+      }
+      useEffect(() => {
+        if (!left || left === NEW_LEFT) { lastAutoLeft.current = left; return }
+        if (lastAutoLeft.current === left) return
+        lastAutoLeft.current = left
+        const match = bindings.find(binding => binding.dshSessionIds?.includes(left))
+        if (!match) return
+        const session = rowFor(match)
+        // A hidden row (archived/compacted switch off) cannot be selected
+        // without also revealing it, so reveal it instead of selecting nothing.
+        if (!session) return
+        // A row the switches currently hide gets revealed, so the user can see
+        // the pair. A stub is revealed but NOT selected: pairing with it can
+        // only fail ("no importable messages"), and the row itself refuses
+        // clicks for the same reason.
+        if (session.importable === false) { setShowCompacted(true); return }
+        if (session.archived === true) setShowArchived(true)
+        setRight({ ...session, machineId: match.machineId })
+      }, [left, bindings, cache.external])
 
       // A row's `name` is the tool's own id (a UUID, or a rollout timestamp),
       // which tells a reader nothing. The card shows the title and the first
@@ -405,7 +469,11 @@ window.__ModuleLoader__.load({
       const rightTree = useMemo(() => {
         return machines.map(machine => {
           const sessions = cache.external?.[machine.id] ?? []
-          const automated = session => session.threadSource === 'guardian_review' || session.threadSource === 'subagent'
+          const automated = session => session.threadSource === 'guardian_review'
+            || session.threadSource === 'subagent'
+            // Antigravity's title-generator / helper turns live in the same
+            // storage as real conversations and are just as uninteresting.
+            || session.threadSource === 'utility'
           // Three independent switches decide which rows are visible. A
           // compacted stub hides by default (it cannot be imported), archived
           // threads show by default, automated threads hide by default.
@@ -491,7 +559,9 @@ window.__ModuleLoader__.load({
             },
           })
           setLastResult(result.result)
-          if (result.result?.failure) setError(result.result.failure.reason)
+          // Clear before setting: a failure that a later action fixes must not
+          // leave the red banner pinned (it used to clear only on a clean poll).
+          setError(result.result?.failure ? result.result.failure.reason : '')
           await refreshDshSessions()
           await load(true)
         } catch (e) { setError(e.message) } finally { setBusy(false) }
@@ -516,7 +586,7 @@ window.__ModuleLoader__.load({
       }
 
       const unbind = async id => {
-        if (!window.confirm(t('panel.confirmRemove'))) return
+        setConfirming('')
         setBusy(true)
         try { await rpc('unbind', { id }); await load() } catch (e) { setError(e.message) } finally { setBusy(false) }
       }
@@ -591,7 +661,7 @@ window.__ModuleLoader__.load({
           onClick: () => setLeft(left === NEW_LEFT ? '' : NEW_LEFT),
           role: 'button',
           tabIndex: 0,
-          onKeyDown: event => { if (event.key === 'Enter') setLeft(NEW_LEFT) },
+          onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') setLeft(NEW_LEFT) },
           children: [
             jsxs('div', { className: 'cs-itemMain', children: [
               jsx('div', { className: 'cs-itemTitle', children: t('panel.newSession') }),
@@ -622,7 +692,7 @@ window.__ModuleLoader__.load({
                   onClick: () => setLeft(selected ? '' : session.id),
                   role: 'button',
                   tabIndex: 0,
-                  onKeyDown: event => { if (event.key === 'Enter') setLeft(session.id) },
+                  onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') setLeft(session.id) },
                   ...hoverProps(session),
                   children: [
                     jsxs('div', { className: 'cs-itemMain', children: [
@@ -730,7 +800,7 @@ window.__ModuleLoader__.load({
                                 onClick: () => setRight(isNew ? null : { __new: true, machineId: machine.id, kind }),
                                 role: 'button',
                                 tabIndex: 0,
-                                onKeyDown: event => { if (event.key === 'Enter') setRight({ __new: true, machineId: machine.id, kind }) },
+                                onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') setRight({ __new: true, machineId: machine.id, kind }) },
                                 children: [jsxs('div', { className: 'cs-itemMain', children: [
                                   jsx('div', { className: 'cs-itemTitle', children: t('panel.newExternal') }),
                                   jsx('div', { className: 'cs-itemMeta', children: t('panel.newExternalHint') }),
@@ -752,7 +822,7 @@ window.__ModuleLoader__.load({
                               onClick: stub ? undefined : () => setRight(selected ? null : { ...session, machineId: machine.id }),
                               role: 'button',
                               tabIndex: 0,
-                              onKeyDown: event => { if (event.key === 'Enter') setRight({ ...session, machineId: machine.id }) },
+                              onKeyDown: event => { if (event.key === 'Enter' || event.key === ' ') setRight({ ...session, machineId: machine.id }) },
                               ...hoverProps(session),
                               children: [
                                 jsxs('div', { className: 'cs-itemMain', children: [
@@ -850,12 +920,30 @@ window.__ModuleLoader__.load({
                       onClick: () => void sync(binding.id, binding.direction),
                       children: t('panel.syncNow'),
                     }),
-                    jsx('button', {
-                      className: 'cs-btn danger',
-                      disabled: busy,
-                      onClick: () => void unbind(binding.id),
-                      children: t('panel.removeSource'),
-                    }),
+                    // Two-step removal, in the row it belongs to: first click
+                    // asks, nothing is destroyed until the second.
+                    confirming === binding.id
+                      ? jsxs('span', { className: 'cs-confirm', role: 'group', 'aria-label': t('panel.confirmRemove'), children: [
+                        jsx('button', {
+                          className: 'cs-btn danger',
+                          disabled: busy,
+                          autoFocus: true,
+                          onClick: () => void unbind(binding.id),
+                          children: t('panel.removeConfirmYes'),
+                        }),
+                        jsx('button', {
+                          className: 'cs-btn',
+                          disabled: busy,
+                          onClick: () => setConfirming(''),
+                          children: t('panel.removeConfirmNo'),
+                        }),
+                      ] })
+                      : jsx('button', {
+                        className: 'cs-btn danger',
+                        disabled: busy,
+                        onClick: () => setConfirming(binding.id),
+                        children: t('panel.removeSource'),
+                      }),
                   ] }) }),
                 ],
               }, binding.id)
@@ -959,8 +1047,8 @@ window.__ModuleLoader__.load({
           }),
         ] }),
 
-        error ? jsx('div', { className: 'cs-err', children: error }) : null,
-        lastResult?.failure ? jsxs('div', { className: 'cs-err', children: [
+        error ? jsx('div', { className: 'cs-err', role: 'alert', children: error }) : null,
+        lastResult?.failure ? jsxs('div', { className: 'cs-err', role: 'alert', children: [
           jsx('div', { children: `${t('panel.failure')} ${lastResult.failure.reason}` }),
           ...(lastResult.failure.conditions ?? []).map((c, i) => jsx('div', { children: `• ${c}` }, i)),
           ...(lastResult.failure.cleanup ?? []).map((c, i) => jsx('div', { children: `• ${c}` }, `c${i}`)),
@@ -1146,6 +1234,8 @@ window.__ModuleLoader__.load({
       'panel.pickLeft': 'Select a DSH session on the left first.',
       'panel.pickRight': 'Select an external session on the right first.',
       'panel.removeSource': 'Remove',
+      'panel.removeConfirmYes': 'Remove',
+      'panel.removeConfirmNo': 'Cancel',
       'panel.confirmRemove': 'Remove this sync binding?',
       'panel.cancel': 'Cancel',
       'panel.save': 'Save',
@@ -1247,6 +1337,8 @@ window.__ModuleLoader__.load({
       'panel.pickLeft': '请先在左侧选择一个 DSH 会话。',
       'panel.pickRight': '请先在右侧选择一个外部会话。',
       'panel.removeSource': '删除',
+      'panel.removeConfirmYes': '确认删除',
+      'panel.removeConfirmNo': '取消',
       'panel.confirmRemove': '确定删除这个同步绑定？',
       'panel.cancel': '取消',
       'panel.save': '保存',
@@ -1298,8 +1390,13 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       hostSessions = ctx.sessions
-      applyStyle()
+      // Bound at apply scope so slot labels (sidebar, settings nav) resolve
+      // through the same dictionaries as the page itself — they were hardcoded
+      // Chinese before, so an English user saw a Chinese nav entry.
+      let t = key => key
       ctx.effect(() => ctx.locale.register(NS, { en, zh }), 'conversation-sync/dictionaries')
+      ctx.effect(() => { t = ctx.locale.bind(NS); return () => { t = key => key } }, 'conversation-sync/translate')
+      ctx.effect(applyStyle, 'conversation-sync/style')
 
       // The plugin's own detail page (Plugins → this bundle) always renders:
       // it is where a user looks to confirm the plugin is installed at all, so
@@ -1314,7 +1411,7 @@ window.__ModuleLoader__.load({
             name: 'settings.section',
             id: PKG,
             order: 45,
-            label: () => '会话同步',
+            label: () => t('settings.nav'),
             locale: NS,
             inject: () => ({}),
           }, Page)),
@@ -1331,7 +1428,7 @@ window.__ModuleLoader__.load({
             name: 'sidebar.panellist',
             id: PKG,
             order: 30,
-            label: () => '会话同步',
+            label: () => t('settings.nav'),
             locale: NS,
             inject: () => ({}),
           }, MarkIcon)),

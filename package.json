@@ -1,6 +1,6 @@
 {
   "name": "dsh-conversation-sync",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "Import conversations into DSH from Claude Code, Codex CLI, WorkBuddy, TRAE, Antigravity, OpenCode, generic JSONL and DeepSeek exports — and keep them in sync both ways, over SSH too.",
   "keywords": [
     "dsh",
@@ -30,7 +30,8 @@
     "url": "https://github.com/sheenisme/dsh-conversation-sync/issues"
   },
   "engines": {
-    "node": ">=22.13"
+    "node": ">=22.13",
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
   },
   "type": "module",
   "main": "./index.js",
@@ -39,7 +40,8 @@
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "files": [
     "index.js",
@@ -51,8 +53,8 @@
     "README.md",
     "README.zh-CN.md",
     "docs/*.md",
-    "docs/*.png",
-    "docs/*.svg",
+    "docs/cover.png",
+    "docs/cover.svg",
     "LICENSE"
   ],
   "scripts": {
@@ -83,6 +85,7 @@
     "access": "public"
   },
   "dsh": {
+    "manifestVersion": 1,
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

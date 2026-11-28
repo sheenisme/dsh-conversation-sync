@@ -68,6 +68,11 @@ OpenCode and the DeepSeek export are **import-only**: OpenCode keeps sessions in
 a live SQLite database, and an export ZIP is a snapshot rather than a
 conversation the tool can resume.
 
+Each tool gets a different line shape, and syncing has to respect it: a Claude
+Code file needs `parentUuid` chains and `tool_use`/`tool_result` blocks, a Codex
+rollout needs `session_meta` plus ascending `ordinal` values. The exact rules,
+per tool and per field, are in [docs/FORMATS.md](docs/FORMATS.md).
+
 ## Safety
 
 Both directions go through the same three steps, so a sync either lands
@@ -93,8 +98,8 @@ completely or not at all:
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-199 unit tests cover the pure modules; CI additionally installs the packed plugin
-into five real DSH releases and drives the actual RPC surface through twelve
+225 unit tests cover the pure modules; CI additionally installs the packed plugin
+into five real DSH releases and drives the actual RPC surface through thirteen
 scenarios. See [docs/TECHNICAL.md](docs/TECHNICAL.md#testing) for what each CI job
 proves and how to run the harness locally.
 

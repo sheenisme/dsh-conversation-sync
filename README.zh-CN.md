@@ -60,6 +60,10 @@ dsh plugin --profile <name> add dsh-conversation-sync
 OpenCode 和 DeepSeek 导出是**只导入**的：OpenCode 的会话在一个活跃的 SQLite 库里，
 而导出 ZIP 是快照，不是工具能继续的对话。
 
+每种工具的行格式都不一样，同步必须按各自的格式来：Claude Code 的文件需要
+`parentUuid` 链和 `tool_use`/`tool_result` 块，Codex 的 rollout 需要 `session_meta`
+和递增的 `ordinal`。逐工具、逐字段的规则见 [docs/FORMATS.zh-CN.md](docs/FORMATS.zh-CN.md)。
+
 ## 安全性
 
 两个方向都走同样三步，所以一次同步要么完整落地，要么完全不动：
@@ -79,7 +83,7 @@ OpenCode 和 DeepSeek 导出是**只导入**的：OpenCode 的会话在一个活
 npm test        # 单元测试，node:test，不需要网络也不需要 DSH
 ```
 
-199 个单元测试覆盖纯模块；CI 另外会把打包后的插件装进五个真实 DSH 版本，并通过十二个
+225 个单元测试覆盖纯模块；CI 另外会把打包后的插件装进五个真实 DSH 版本，并通过十三个
 场景驱动真实的 RPC 接口。每个 CI 任务证明了什么、如何在本地跑测试环境，见
 [docs/TECHNICAL.zh-CN.md](docs/TECHNICAL.zh-CN.md#testing)。
 

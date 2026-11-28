@@ -170,6 +170,14 @@ jobs:
           node scripts/ci/scenario.mjs --scenario export \
             --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
             --home "$RUNNER_TEMP/home-export" --port 5402
+      # The strongest guarantee: what we write is what the tool can read. Each
+      # format is exported and then imported back, and the message count must be
+      # identical - a flattened transcript fails here.
+      - name: Scenario - native export round-trips through every format
+        run: |
+          node scripts/ci/scenario.mjs --scenario native \
+            --dsh "$(cat /tmp/dsh-bin.txt)" --tarball "$(ls dsh-conversation-sync-*.tgz)" \
+            --home "$RUNNER_TEMP/home-native" --port 5413 --fixtures "$PWD/test/fixtures"
       - name: Scenario - every supported tool format imports
         run: |
           node scripts/ci/scenario.mjs --scenario formats \

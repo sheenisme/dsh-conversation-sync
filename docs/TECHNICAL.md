@@ -96,11 +96,21 @@ or an answer after a tool result) each get their own `step/start`…`step/end`
 pair inside a single turn; collapsing them into one step drops every message
 after the first.
 
-**DSH → external (`out`).** New `user/message` and `assistant/message` events on
-a bound DSH session are read by DSH sequence number, rendered in the original
-tool's JSONL format tagged with `dshSyncId:dshSessionId:seq`, and appended to
-the external file via the machine's transport. A per-session sequence watermark
-prevents duplicates. DeepSeek export ZIP and OpenCode are import-only;
+**DSH → external (`out`).** New events on a bound DSH session are read by DSH
+sequence number — not just messages: `tool/call` and `tool/result` are read too,
+so a tool pair survives the crossing (see `readDshSessionExchanges` in
+`lib/dsh-sessions.js`). Each tool then gets its own native line shape from
+`lib/native.js`, tagged with `dshSyncId`, and the result is appended through the
+machine's transport. A per-session sequence watermark prevents duplicates.
+
+Why a separate writer instead of the adapter's renderer: a flattened
+`{"role":"user","content":"…"}` line is readable by *our* parser but not by the
+tool. Claude Code needs a `parentUuid` chain, a `cwd`, a model-bearing assistant
+message and `tool_use`/`tool_result` blocks; Codex needs one `session_meta`
+header and monotonically increasing `ordinal` values across appends. The
+`native` CI scenario exports a session and imports it back, asserting the message
+count is unchanged, so a shape the real tool would reject fails the build. Field
+rules per tool are in [FORMATS.md](FORMATS.md). DeepSeek export ZIP and OpenCode are import-only;
 exporting to either is rejected with a clear error rather than a silent no-op.
 An unknown DSH session id fails with *"DSH session … does not exist; re-select it
 on the left"* — it used to return `written: 0` as if the export had succeeded.
@@ -244,12 +254,18 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 199 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 225 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
 pins the listing contract (a row's `count` is messages, never raw events) and the
-`strict` read that an export needs. `test/openssh.test.js` drives the system-ssh
+`strict` read that an export needs. `test/native.test.js` covers the writers in
+`lib/native.js`: it asserts the ENVELOPE each tool requires (a `parentUuid` chain
+and `cwd` for Claude Code, `session_meta` plus ascending `ordinal` for Codex),
+that appending continues the numbering instead of reusing it, and that a tool
+result never turns into a user message. The `native` CI scenario closes the loop
+by exporting a session and importing it back, so a shape the real tool would
+reject fails the build. `test/openssh.test.js` drives the system-ssh
 transport through a stand-in `ssh` on PATH, so the command building, shell
 quoting, exit-code mapping and the "fail once, not once per root" cache are
 covered without a server. `test/client.test.js` loads `client.js`
@@ -266,7 +282,7 @@ that unit fixtures cannot:
 | `install-dsh.mjs` | installs one DSH version so it can actually run under plain Node — it reads `@deepseek-ai/dsh-app-boot`'s peer ranges from the registry, because npm does not install the peers of a transitive package |
 | `harness.mjs` | shared profile bootstrap, health-line wait, activation check and auth-cookie handshake |
 | `boot-check.mjs` | "does this DSH version support the plugin": install, boot, import, read back |
-| `scenario.mjs` | `import`, `export`, `formats`, `failure`, `empty`, `reimport`, `direction`, `keys`, `ssh`, `safety`, `placements`, `bindings` — the user journey over the real RPC surface |
+| `scenario.mjs` | `import`, `export`, `native`, `formats`, `failure`, `empty`, `reimport`, `direction`, `keys`, `ssh`, `safety`, `placements`, `bindings` — the user journey over the real RPC surface |
 
 `.github/workflows/ci.yml` runs three jobs:
 
@@ -392,15 +408,27 @@ the panel renders them dimmed and unselectable, and the machine header prints ho
 many there are. Before this, they looked like ordinary rows and choosing one
 produced `sync failed: … has no importable messages` only after the click.
 
+`compacted` is **not** "we saw a compaction marker"; it is
+`importable === false`. Keying it on the marker looked precise and was wrong: a
+Codex `session_meta` line is ~19 KB, so the 8 KB head window ends *inside* that
+single line and never reaches the compaction payload. The switch was therefore
+off while compacted stubs stayed on screen. Emptiness is the honest signal — a
+thread with real messages is never empty — and the marker is only corroboration.
+`test/discovery.test.js` encodes exactly that case with a 40 KB `session_meta`.
+
 Two traps found while building this, both now encoded in tests:
 
-1. **A truncated read cannot prove a file is empty.** The first version decided
-   `importable` from the bytes it had read. Big rollouts fill the 8 KB (then
-   256 KB) window with preamble, so eight real conversations were labelled
-   "no conversation". The rule is now: if the window was truncated *and* the file
-   has more than three lines, it holds a conversation. The override has to run
-   **after** the wider re-read, which replaces the scan result wholesale — the
-   first attempt put it before, and the re-read silently undid it.
+1. **Size is not evidence.** The first version decided `importable` from how
+   many bytes it had read: a window that ended before the end of the file was
+   taken to mean "there must be more conversation in there", so a big file
+   counted as a conversation and a small one did not. Measured against real
+   data that rule was exactly inverted — 15 of 30 Claude sessions were hidden
+   (four small ones with a full exchange, thirteen around 150 KB) while every
+   file over 624 KB was listed on the strength of its size alone. The scan now
+   asks the tool's own adapter whether the bytes it read contain a message or a
+   tool call, and if that says no it reads one tail window before giving up. A
+   file is a conversation because of what it contains, never because of how
+   many bytes it has.
 2. **The user seat is not the user.** Codex injects `<environment_context>`,
    `# AGENTS.md instructions`, `<external_ide_context>` and its own multi-agent
    briefs as `role: "user"` messages. Titles taken from those read
@@ -410,6 +438,49 @@ Two traps found while building this, both now encoded in tests:
 Archived threads move to `~/.codex/archived_sessions` and are no longer under
 `sessions/`. That directory is scanned too — otherwise archiving a conversation
 made it disappear from the list even though the file is intact.
+
+## An idle panel should cost nothing
+
+The panel polls while it is open, and every poll used to ask the host for a
+newer-side comparison per binding. Each comparison is a `stat` over the
+binding's transport, which on SSH is a network round trip — so a panel left open
+in a background tab kept dialling every remote machine every five seconds,
+forever, to answer a question nobody was looking at. Three changes:
+
+- `document.hidden` gates the interval. A hidden tab does no work, and becoming
+  visible triggers one immediate refresh so the panel is never stale when the
+  user comes back.
+- Comparison results are cached for two seconds and de-duplicated by promise, so
+  two polls in flight share one `stat` instead of stacking. A completed or
+  failed sync drops the entry, because both sides just moved and the cached
+  answer is wrong by construction.
+- Every `load()` takes a generation number. A slow poll that resolves after the
+  user pressed a button would otherwise write its older snapshot over the fresher
+  one — the panel could show a binding as unchecked immediately after the user
+  checked it. A stale response is now dropped instead of applied.
+
+## What the panel relies on being true
+
+Three details are easy to get wrong because they fail quietly:
+
+- **The RPC path is root-absolute.** The route is served at
+  `/api/conversation-sync/rpc`. A relative `api/…` works while the shell is
+  mounted at `/` and 404s the moment the app is hosted under a path prefix.
+- **The stylesheet lives inside an effect.** The `<style>` node is appended once
+  and removed when the plugin unloads. Appending without a disposer leaves the
+  CSS behind after a disable or reload, and a module-level "already applied" flag
+  makes it impossible to apply again.
+- **Slot labels are functions, not strings.** The sidebar and the settings nav
+  call `t('settings.nav')`; the host re-reads the label whenever the locale
+  revision changes. A hardcoded label shows Chinese to an English user and never
+  updates.
+
+`meta.detail` in `locale/*.json` is a fourth: the host reads that path and, if
+the file is missing, reports `plugin-manager/detail-unavailable` **instead of**
+falling back to the README. It must name a file that ships — here
+`docs/TECHNICAL.md` and `docs/TECHNICAL.zh-CN.md`. `test/manifest.test.js` pins
+the manifest details that the host reads by name (`exports`, the bundle patch,
+`engines.dsh`, optional peers).
 
 ## The status strip exists to expose a stale host
 

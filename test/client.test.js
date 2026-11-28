@@ -49,7 +49,16 @@ async function loadClientSync() {
   }
   const module = definition.factory(name => ({
     'react/jsx-runtime': { jsx: () => null, jsxs: () => null, Fragment: null },
-    react: { useCallback: () => {}, useEffect: () => {}, memo: () => {}, useMemo: () => {}, useState: () => [] },
+    react: {
+      useCallback: () => {},
+      useEffect: () => {},
+      memo: () => {},
+      useMemo: () => {},
+      // useRef is used by the left->right auto-select effect; the stub returns
+      // a fresh object because no component body runs in these tests.
+      useRef: () => ({ current: undefined }),
+      useState: () => [],
+    },
   })[name])
   module.apply(ctx)
   // Let the preferences fetch resolve and its .then register the entries.
@@ -160,6 +169,49 @@ test('client: both dictionaries carry the same keys, including the settings labe
   const zh = Object.keys(dict.zh).sort()
   assert.deepEqual(zh, en, 'en and zh must not drift apart')
   assert.ok(en.includes('settings.nav'), 'the Settings entry needs a label key')
+})
+
+test('client: slot labels are translated, not hardcoded Chinese', async () => {
+  // A settings/sidebar entry whose label is a literal shows Chinese to an
+  // English user; the host re-reads the label on every locale revision, so a
+  // function through `t` is all it takes.
+  const { registrations } = await loadClient()
+  const labelled = registrations.filter(entry => typeof entry.label === 'function')
+  assert.ok(labelled.length > 0, 'the entries must carry a label function')
+  for (const entry of labelled) {
+    const text = entry.label()
+    assert.equal(typeof text, 'string')
+    assert.doesNotMatch(text, /[\u4e00-\u9fff]/, `label for ${entry.name} must come from the dictionary, got ${text}`)
+  }
+  // ...and it really is the dictionary: English by default in this stub.
+  const nav = labelled.find(entry => entry.name === 'settings.section')
+  assert.equal(nav.label(), 'Conversation sync')
+})
+
+test('client: the RPC path is root-absolute', async () => {
+  // 'api/...' works at '/' and 404s under a path prefix; every reference plugin
+  // registers an absolute route.
+  assert.match(source, /fetch\('\/api\/conversation-sync\/rpc'/)
+  assert.doesNotMatch(source, /fetch\('api\/conversation-sync\/rpc'/)
+})
+
+test('client: the stylesheet is registered through an effect so it can be removed', async () => {
+  assert.match(source, /ctx\.effect\(applyStyle, 'conversation-sync\/style'\)/)
+  assert.match(source, /return \(\) => tag\.remove\(\)/)
+})
+
+test('client: a poll never overwrites a newer one, and never runs while hidden', async () => {
+  assert.match(source, /const loadGen = useRef\(0\)/)
+  assert.match(source, /if \(mine !== loadGen\.current\) return/)
+  assert.match(source, /document\.hidden/)
+})
+
+test('client: browser-wide confirmation is not used for destructive actions', async () => {
+  // window.confirm blocks the whole app and cannot be styled; the panel asks
+  // with its own inline confirmation instead.
+  assert.doesNotMatch(source, /window\.confirm[(]/)
+  // The comment above the state says why it exists; that mention is prose, not
+  // a call, so the assertion above uses the call shape explicitly.
 })
 
 test('client: every t() key used by the UI exists in the dictionary', async () => {

@@ -2,55 +2,7 @@
   "meta": {
     "title": "Conversation sync",
     "description": "Bidirectionally sync conversations across local and Remote-SSH machines discovered from ~/.ssh/config, including jump hosts. Import Claude Code, Codex CLI, generic JSONL and DeepSeek exports.",
-    "detail": "docs/DETAIL.md"
+    "detail": "docs/TECHNICAL.md"
   },
-  "summary": "Conversation sync",
-  "panel": {
-    "title": "Conversation sync — bidirectional + Remote-SSH",
-    "subtitle": "Left: all DSH sessions · Right: sessions on each machine · pick a direction to sync",
-    "refresh": "Refresh sessions",
-    "machines": "Machines (from ~/.ssh/config, jump hosts included)",
-    "jump": "jump host",
-    "key": "SSH private key",
-    "keySet": "configured",
-    "keyMissing": "not configured",
-    "setKey": "Set key path",
-    "keyPath": "Private-key PATH on this machine (stored as a DSH credential)",
-    "dshColumn": "DSH sessions (this installation)",
-    "externalColumn": "External sessions (selected machine)",
-    "import": "← Import to DSH",
-    "export": "Export to remote →",
-    "bidirectional": "⇄ Sync both ways",
-    "arrowsHint": "Select one session on each side, then choose a direction. A one-sided session is imported/exported first, then kept in sync.",
-    "bindings": "Active sync bindings",
-    "bound": "bound:",
-    "externalOnly": "No DSH session yet — use Import to create one, or select a DSH session on the left before exporting.",
-    "noDsh": "No DSH sessions found.",
-    "noExternal": "No sessions found on this machine. Configure the SSH key and refresh.",
-    "noBindings": "No bindings yet. Pick two sessions above and choose a direction.",
-    "lastSync": "Last sync:",
-    "failure": "Sync failed:",
-    "pickLeft": "Select a DSH session on the left first.",
-    "pickRight": "Select an external session on the right first.",
-    "removeSource": "Remove binding",
-    "confirmRemove": "Remove this sync binding?",
-    "cancel": "Cancel",
-    "save": "Save",
-    "kinds": {
-      "claude": "Claude Code",
-      "codex": "Codex CLI",
-      "jsonl": "Generic JSONL",
-      "deepseekExport": "DeepSeek export ZIP",
-      "workbuddy": "WorkBuddy / CodeBuddy",
-      "trae": "TRAE",
-      "antigravity": "Antigravity",
-      "opencode": "OpenCode"
-    },
-    "warnings": {
-      "writeBack": "Warning: write-back edits the original tool's live files. A backup is taken before every write and restored on failure, but data loss is still possible."
-    }
-  },
-  "settings": {
-    "nav": "Conversation sync"
-  }
+  "summary": "Conversation sync"
 }

@@ -82,9 +82,18 @@ v4 格式很严格，其中两条规则很容易出错，而且只有在回读�
 各自拥有自己的 `step/start`…`step/end` 对；把它们合并成一个 step 会丢掉第一条之后的
 所有消息。
 
-**DSH → 外部（`out`）。** 已绑定 DSH 会话上的新 `user/message` 和 `assistant/message` 事件
-按 DSH 序列号读取，以原工具的 JSONL 格式渲染并打上 `dshSyncId:dshSessionId:seq` 标记，
-然后通过该机器的传输层追加到外部文件。每会话的序列水位线可防止重复。DeepSeek 导出 ZIP
+**DSH → 外部（`out`）。** 已绑定 DSH 会话上的新事件按 DSH 序列号读取——不只是消息：
+`tool/call` 与 `tool/result` 也会读出来（见 `lib/dsh-sessions.js` 的
+`readDshSessionExchanges`），这样一对工具调用能完整跨过去。随后每种工具从
+`lib/native.js` 得到它自己的原生行格式，带上 `dshSyncId` 标记，通过该机器的传输层追加
+到外部文件。每会话的序列水位线可防止重复。
+
+为什么要单独一套写出器，而不是复用适配器的渲染器：一行扁平的
+`{"role":"user","content":"…"}` **我们的**解析器读得懂，但那个工具读不懂。Claude Code
+需要 `parentUuid` 链、`cwd`、带模型名的助手消息以及 `tool_use`/`tool_result` 块；Codex
+需要一个 `session_meta` 头部，以及追加时保持递增的 `ordinal`。CI 的 `native` 场景会导出
+一个会话再导入回来并断言消息条数不变，所以连真实工具都会拒绝的形状会让构建失败。
+逐工具的字段规则见 [FORMATS.zh-CN.md](FORMATS.zh-CN.md)。DeepSeek 导出 ZIP
 和 OpenCode 都是只导入的；向其中任何一个导出都会被明确报错拒绝，而不是静默地什么都不做。
 未知的 DSH 会话 id 会失败并提示 *"DSH session … does not exist; re-select it on the left"*
 ——以前它会返回 `written: 0`，就好像导出成功了一样。
@@ -192,7 +201,7 @@ keyRefFor('ssh:BAAI-Ascend') // conversation_sync_ssh_key_ssh_BAAI_Ascend_1e7011
 
 ## Testing
 
-`npm test` 运行 199 个单元测试（`node:test`，不需要网络也不需要 DSH）。每种工具格式在
+`npm test` 运行 225 个单元测试（`node:test`，不需要网络也不需要 DSH）。每种工具格式在
 `test/fixtures/` 里都有一个 fixture，会被推过真实的流水线——
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents`——因此断言针对的是导入后的对话
 内容，而不是内部结构。`test/dsh-sessions.test.js` 固定了列表契约（一行的 `count` 是消息数，
@@ -202,6 +211,10 @@ keyRefFor('ssh:BAAI-Ascend') // conversation_sync_ssh_key_ssh_BAAI_Ascend_1e7011
 `test/client.test.js` 通过桩模块加载器加载 `client.js`，让浏览器那一半也可测：当某个 service
 被使用却不在 `inject` 中时（这是一个真实的 bug——没有 `sessions`，侧边栏永远不知道刚导入
 的会话）、当 `settings.section` 条目未注册时、或当某个 `en`/`zh` 键发生漂移时，测试都会失败。
+`test/native.test.js` 覆盖 `lib/native.js` 里的写出器：它断言每种工具要求的信封（Claude Code
+需要 `parentUuid` 链和 `cwd`，Codex 需要 `session_meta` 与递增的 `ordinal`）、追加时继续
+编号而不是重复使用，以及工具结果绝不会变成用户消息。CI 的 `native` 场景把闭环补上：导出一个
+会话再导入回来，于是连真实工具都会拒绝的形状会让构建失败。
 
 `scripts/ci/` 存放 harness 级别的检查，正是它们能抓住单元测试 fixture 抓不到的格式 bug：
 
@@ -210,7 +223,7 @@ keyRefFor('ssh:BAAI-Ascend') // conversation_sync_ssh_key_ssh_BAAI_Ascend_1e7011
 | `install-dsh.mjs` | 安装一个 DSH 版本，使其能在纯 Node 下真正运行——它从 registry 读取 `@deepseek-ai/dsh-app-boot` 的 peer 范围，因为 npm 不会安装传递依赖的 peer |
 | `harness.mjs` | 共享的 profile 引导、健康行等待、激活检查与 auth-cookie 握手 |
 | `boot-check.mjs` | 「这个 DSH 版本是否支持插件」：安装、启动、导入、回读 |
-| `scenario.mjs` | `import`、`export`、`formats`、`failure`、`empty`、`reimport`、`direction`、`keys`、`ssh`、`safety`、`placements`、`bindings`——在真实 RPC 接口上走完用户旅程 |
+| `scenario.mjs` | `import`、`export`、`native`、`formats`、`failure`、`empty`、`reimport`、`direction`、`keys`、`ssh`、`safety`、`placements`、`bindings`——在真实 RPC 接口上走完用户旅程 |
 
 `.github/workflows/ci.yml` 运行三个 job：
 
@@ -313,13 +326,20 @@ Codex 会把几种 rollout 写进 `~/.codex/sessions`。它们靠 `session_meta.
 机器标题会打印出它们的数量。在此之前，它们看起来和普通行一样，选中一个后只会在点击之后
 报 `sync failed: … has no importable messages`。
 
+`compacted` **不是**「我们看见了压缩标记」，而是 `importable === false`。用标记作判据
+看起来精确，实际上是错的：Codex 的 `session_meta` 一行就有约 19 KB，8 KB 的头部窗口
+结束在**这一行内部**，永远到不了那条 compaction 负载。于是开关是关的，压缩存根却还留在
+屏幕上。空才是诚实的信号——含有真实消息的线程永远不会是空的——标记只作旁证。
+`test/discovery.test.js` 用 40 KB 的 `session_meta` 把这个情形固定了下来。
+
 构建过程中发现两个坑，如今都已写进测试：
 
-1. **读取被截断不能证明文件是空的。** 第一版根据已读到的字节判断 `importable`。大的
-   rollout 会用前导内容填满 8 KB（后来是 256 KB）的窗口，于是八个真实对话被贴上了
-   「无对话内容」的标签。现在的规则是：如果窗口被截断*且*文件超过三行，就认为它含有对话。
-   这个覆盖必须放在更宽的重新读取**之后**，后者会整体替换扫描结果——第一次尝试把它放在
-   前面，结果重新读取悄悄把它撤销了。
+1. **大小不是证据。** 第一版根据「读了多少字节」判断 `importable`：窗口在文件末尾之前
+   结束，就认为「里面一定还有对话」，于是大文件被当作对话、小文件不被当作对话。拿真实
+   数据一量，这条规则恰好是反的——30 个 Claude 会话里有 15 个被隐藏（其中四个是小文件但
+   含有完整一轮问答，十三个在 150 KB 左右），而所有超过 624 KB 的文件仅凭体积就被列出。
+   现在扫描会问该工具自己的适配器：读到的字节里有没有消息或工具调用；如果答案是没有，
+   就读一个尾部窗口再放弃。一个文件是对话，是因为它**装着**什么，而不是因为它有多大。
 2. **坐在用户位置上的人不是用户。** Codex 会把 `<environment_context>`、
    `# AGENTS.md instructions`、`<external_ide_context>` 以及它自己的多 agent 简介作为
    `role: "user"` 消息注入。从这些消息取标题时，每一行都读成
@@ -328,6 +348,37 @@ Codex 会把几种 rollout 写进 `~/.codex/sessions`。它们靠 `session_meta.
 
 归档的线程会移到 `~/.codex/archived_sessions`，不再位于 `sessions/` 下。该目录也会被扫描——
 否则归档一段对话会让它从列表里消失，即使文件完好无损。
+
+## 闲置的面板不应该有成本
+
+面板打开时会轮询，而每一次轮询过去都会为每个绑定向宿主询问「哪一侧更新」。每次比较都是一次
+跨该绑定传输的 `stat`，在 SSH 上就是一次网络往返——于是留在后台标签页里的面板会每五秒钟
+拨一次每台远端机器，永远如此，只为了回答一个没人正在看的问题。改动有三处：
+
+- 用 `document.hidden` 控制定时器。隐藏的标签页不做任何事，重新可见时立刻刷新一次，用户
+  回来时面板不会是过期的。
+- 比较结果缓存两秒，并按 Promise 去重，所以两个同时在飞的轮询共享一次 `stat` 而不是叠加。
+  同步成功或失败都会清掉对应条目，因为此时两侧都刚刚变动，缓存答案按定义就是错的。
+- 每次 `load()` 取一个世代号。一次慢轮询如果用户在按下按钮之后才返回，就会把它那份更旧的
+  快照写到更新的快照之上——面板可能刚被用户勾选就显示成未勾选。现在过期响应会被丢弃，
+  而不是被应用。
+
+## 面板依赖哪些「必须成立」的细节
+
+有三处细节很容易写错，因为它们都是静默失败：
+
+- **RPC 路径是根绝对路径。** 路由挂在 `/api/conversation-sync/rpc`。相对的 `api/…` 在
+  外壳挂载于 `/` 时能用，一旦应用被部署在某个路径前缀下就会 404。
+- **样式表活在 effect 里。** `<style>` 节点只追加一次，并在插件卸载时移除。只追加不提供
+  清理函数，会让 CSS 在禁用或重载之后残留，而模块级的「已应用」标记会让再次应用永远无效。
+- **slot 标签是函数，不是字符串。** 侧边栏和设置导航调用 `t('settings.nav')`；宿主在语言
+  修订变化时重新读取标签。硬编码的标签会让英文用户看到中文，而且永远不更新。
+
+`locale/*.json` 里的 `meta.detail` 是第四处：宿主会读取该路径，如果文件不存在就报
+`plugin-manager/detail-unavailable`，而**不会**回退到 README。它必须指向一个真的会被打包
+的文件——这里是 `docs/TECHNICAL.md` 与 `docs/TECHNICAL.zh-CN.md`。
+`test/manifest.test.js` 固定住宿主按名字读取的那几个 manifest 细节（`exports`、bundle patch、
+`engines.dsh`、可选 peer）。
 
 ## 状态条用于暴露过期的宿主
 

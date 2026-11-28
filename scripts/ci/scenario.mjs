@@ -12,7 +12,8 @@
  *
  * Scenarios:
  *   import    a real Claude Code rollout becomes a DSH session with its text
- *   export    a DSH session is written back out as tool records
+ *   export    a DSH session is written back out as a native tool transcript
+ *   native    every format survives export -> re-import unchanged
  *   formats   every supported tool format imports through the same path
  *   failure   a broken source fails with a reason and recovery conditions
  *   empty     a source with no conversation is refused, not imported as a shell
@@ -95,12 +96,79 @@ const scenarios = {
     const text = await fs.readFile(target, 'utf8')
     const lines = text.split('\n').filter(Boolean).map(line => JSON.parse(line))
     assert(lines.length > 0, 'exported file is empty')
-    // The exported rows must be re-readable by the same adapter that reads the
-    // tool's own files, otherwise a round trip would lose the conversation.
-    assert(lines.some(line => /dsh:/.test(JSON.stringify(line))), 'exported rows are not tagged with their source')
-    assert(lines.some(line => line.role === 'user' || line.message?.role === 'user'), 'exported rows lost their roles')
+    // The file must be a CLAUDE CODE transcript, not our own private shape:
+    // the CLI reopens the session itself, so the envelope it depends on
+    // (parentUuid chain, cwd, model-bearing assistant message, real blocks)
+    // has to be there.
+    const first = lines[0]
+    assert(first.parentUuid === null, `the first line does not start the parent chain: ${JSON.stringify(first.parentUuid)}`)
+    assert(first.cwd, `exported lines carry no cwd: ${JSON.stringify(first.cwd)}`)
+    assert(first.sessionId, `exported lines carry no sessionId`)
+    for (let i = 1; i < lines.length; i += 1) {
+      assert(lines[i].parentUuid === lines[i - 1].uuid,
+        `line ${i} does not chain to the line before it: ${JSON.stringify({ prev: lines[i - 1].uuid, self: lines[i].parentUuid })}`)
+    }
+    const assistant = lines.find(line => line.type === 'assistant')
+    assert(assistant?.message?.model, `the assistant line has no model: ${JSON.stringify(assistant?.message)}`)
+    assert(lines.some(line => line.message?.role === 'user'), 'exported rows lost their roles')
+    assert(lines.every(line => line.dshSyncId), 'an exported row lost its source tag and would be re-imported')
     log(`export ok: ${result.written} message(s), ${lines.length} row(s)`)
     return { written: result.written, rows: lines.length }
+  },
+
+  /**
+   * The strongest claim this plugin makes: what it writes, the tool can read.
+   * Export a DSH session into a Claude Code file, then import that same file
+   * back as a SECOND session and compare the conversations. A flattened or
+   * mis-shaped line fails here, while a plain "the file is not empty" check
+   * would pass.
+   */
+  async native(args, rpc) {
+    const results = {}
+    for (const format of FORMATS) {
+      if (format.kind === 'trae') continue
+      const { row } = await importFile(rpc, args, format)
+      const target = path.join(args.home, `native-${format.kind}.jsonl`)
+      const out = await rpc({
+        action: 'pair',
+        binding: { machineId: 'local', externalPath: target, kind: format.kind, direction: 'out', dshSessionIds: [row.id] },
+      })
+      const outResult = out.result ?? out
+      assert(!outResult.error, `${format.kind} export failed: ${JSON.stringify(outResult)}`)
+      assert((outResult.written ?? 0) > 0, `${format.kind} export wrote nothing`)
+      const text = await fs.readFile(target, 'utf8')
+      const lines = text.split('\n').filter(Boolean).map(line => JSON.parse(line))
+      assert(lines.length >= 2, `${format.kind} export produced ${lines.length} line(s)`)
+
+      // Now read our own output back, with the source tag removed first so the
+      // import path does not deliberately skip it. This is exactly what the
+      // real tool would do: a reader that knows nothing about dshSyncId.
+      const stripped = target.replace('.jsonl', '-stripped.jsonl')
+      await fs.writeFile(stripped, lines.map(line => {
+        const copy = { ...line }
+        delete copy.dshSyncId
+        delete copy.dshTitle
+        return JSON.stringify(copy)
+      }).join('\n') + '\n')
+      const back = await rpc({
+        action: 'pair',
+        binding: { machineId: 'local', externalPath: stripped, kind: format.kind, direction: 'in', dshSessionIds: [] },
+      })
+      const backResult = back.result ?? back
+      assert(!backResult.error, `${format.kind} re-import failed: ${JSON.stringify(backResult)}`)
+      assert((backResult.imported ?? 0) > 0, `${format.kind} re-import found no records`)
+      const secondId = backResult.dshSessionIds?.[0] ?? back.binding?.dshSessionIds?.[0]
+      const listing = await rpc({ action: 'sessions', force: true })
+      const backRow = (listing.dsh ?? []).find(item => item.id === secondId)
+      assert(backRow, `${format.kind} re-import produced no session`)
+      // Same words in, same words out: the round trip must not invent or drop
+      // a message, which is what a flattened tool call would do.
+      assert(backRow.count === row.count,
+        `${format.kind} round trip changed the message count: ${row.count} -> ${backRow.count}`)
+      results[format.kind] = { messages: row.count, rows: lines.length }
+      log(`${format.kind} native ok: ${lines.length} row(s), round trip kept ${backRow.count} message(s)`)
+    }
+    return results
   },
 
   async formats(args, rpc) {
