@@ -110,6 +110,30 @@ Titles travel with the conversation in both directions. DSH folds the latest
 rides along on the exported lines as `dshTitle`, and an import restores it —
 including when the session is created for the first time.
 
+### Not every file is a conversation
+
+Codex writes three kinds of rollout into the same directory:
+
+| `thread_source` | what it is | shown |
+| --- | --- | --- |
+| `user` | a conversation you started | yes |
+| `guardian_review` | an automated review of another thread | only with **automated threads** ticked |
+| `subagent` | a worker thread delegated by another session | only with **automated threads** ticked |
+
+When Codex summarises a thread it replaces the body with an **encrypted**
+`compaction` payload and leaves three lines behind: metadata, that blob, and
+settings. Those files are listed but marked *no conversation (compacted)*, and
+they cannot be selected — so pairing can no longer fail with "no importable
+messages" after the fact. The machine header reports both counts, which is why
+the number of rows you can click can be smaller than the number of files on disk.
+
+Titles are also read from *deep* inside a file when necessary: Codex writes the
+environment, `AGENTS.md` and its own briefs into `role: "user"` messages before
+you type anything (a measured median of **153 KB** into a real rollout), so the
+cheap 8 KB head has no title in it. The scan fetches a wider window only for the
+files that need it, and text a tool put in the user seat (`<environment_context>`,
+`# AGENTS.md instructions`, `<external_ide_context>`, …) is never used as a name.
+
 ### Which side is newer?
 
 Before anything is written, both sides are compared and the direction is derived
@@ -224,7 +248,7 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-185 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+190 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics and file-level session restore, host
 keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
 transport, the one-folder migration, and the browser half through a stub module

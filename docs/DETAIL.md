@@ -244,7 +244,7 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 185 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 190 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -369,6 +369,47 @@ Two rules follow from "the title belongs to the conversation":
 * A row's `name` (the tool's own id) is kept as the binding key but is shown
   only as small secondary text. What a reader sees is the title, because a UUID
   and a rollout timestamp cannot tell two conversations apart.
+
+## Three lines can still be a conversation
+
+Codex writes several kinds of rollout into `~/.codex/sessions`. They are told
+apart by `session_meta.payload.thread_source`:
+
+- `user` — a conversation a person started.
+- `guardian_review` — an automated review of another thread.
+- `subagent` — a worker delegated by another session.
+
+On the machine this was built against, 18 of 40 readable rollouts were `user`;
+the rest were automated. The panel lists the automated ones only when
+**automated threads** is ticked, because "where are my own sessions" was a
+reported problem and the answer was "they are there, mixed in with 22 reviews".
+
+A summarised thread is left as exactly three lines: `session_meta`, a
+`response_item` whose payload is `{"type":"compaction","encrypted_content":"…"}`,
+and `event_msg/thread_settings_applied`. The compaction body is encrypted, so
+there is nothing to import. `scanLines()` reports `importable: false` for those,
+the panel renders them dimmed and unselectable, and the machine header prints how
+many there are. Before this, they looked like ordinary rows and choosing one
+produced `sync failed: … has no importable messages` only after the click.
+
+Two traps found while building this, both now encoded in tests:
+
+1. **A truncated read cannot prove a file is empty.** The first version decided
+   `importable` from the bytes it had read. Big rollouts fill the 8 KB (then
+   256 KB) window with preamble, so eight real conversations were labelled
+   "no conversation". The rule is now: if the window was truncated *and* the file
+   has more than three lines, it holds a conversation. The override has to run
+   **after** the wider re-read, which replaces the scan result wholesale — the
+   first attempt put it before, and the re-read silently undid it.
+2. **The user seat is not the user.** Codex injects `<environment_context>`,
+   `# AGENTS.md instructions`, `<external_ide_context>` and its own multi-agent
+   briefs as `role: "user"` messages. Titles taken from those read
+   `<environment_context> <cwd>/Users/…` for every row. `isInjectedText()` skips
+   them; the title is the first thing a person actually typed.
+
+Archived threads move to `~/.codex/archived_sessions` and are no longer under
+`sessions/`. That directory is scanned too — otherwise archiving a conversation
+made it disappear from the list even though the file is intact.
 
 ## The status strip exists to expose a stale host
 

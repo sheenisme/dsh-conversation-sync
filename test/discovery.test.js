@@ -192,5 +192,62 @@ test('scanMachine(): a transport with inspect()/findFiles() is used, not a chunk
   assert.equal(sessions[0].kind, 'claude')
   // One find per root (8 tool roots + 3 Antigravity bases), one inspect per file.
   // The point of the assertion: no per-directory listing and no chunked read.
-  assert.deepEqual(calls, { findFiles: 11, inspect: 1, walk: 0, read: 0 })
+  // 8 tool roots + archived_sessions + 3 antigravity bases
+  assert.deepEqual(calls, { findFiles: 12, inspect: 1, walk: 0, read: 0 })
+})
+
+test('describe(): text the tool injected in the user seat is not a title', async () => {
+  // Codex puts the environment, AGENTS.md and its own briefs into role:"user"
+  // messages before the person types anything. A title taken from those made
+  // every row read "<environment_context> <cwd>/Users/..." - the count was
+  // right and the list was useless.
+  const file = '/home/tester/.codex/sessions/s.jsonl'
+  const transport = memoryTransport({
+    [file]: [
+      JSON.stringify({ type: 'session_meta', payload: { session_id: 'abc', thread_source: 'user' } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>\n  <cwd>/x</cwd>\n</environment_context>' }] } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions for /x\n<INSTRUCTIONS>be nice</INSTRUCTIONS>' }] } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Fix the failing test please.' }] } }),
+    ].join('\n') + '\n',
+  })
+  const result = await scanMachine({ id: 'local' }, { transport, home: '/home/tester' })
+  const row = result.sessions.find(session => session.path === file)
+  assert.equal(row.title, 'Fix the failing test please.')
+  assert.equal(row.threadSource, 'user')
+  assert.equal(row.importable, true)
+})
+
+test('describe(): a three-line stub is listed but marked not importable', async () => {
+  // Twenty of sixty rollouts on a real machine were exactly this: metadata, an
+  // ENCRYPTED compaction, settings. They cannot be imported, and offering them
+  // as ordinary rows produced "no importable messages" only after the click.
+  const file = '/home/tester/.codex/sessions/stub.jsonl'
+  const transport = memoryTransport({
+    [file]: [
+      JSON.stringify({ type: 'session_meta', payload: { session_id: 'stub', thread_source: 'guardian_review' } }),
+      JSON.stringify({ type: 'response_item', payload: { type: 'compaction', encrypted_content: 'gAAAA-encrypted' } }),
+      JSON.stringify({ type: 'event_msg', payload: { type: 'thread_settings_applied' } }),
+    ].join('\n') + '\n',
+  })
+  const result = await scanMachine({ id: 'local' }, { transport, home: '/home/tester' })
+  const row = result.sessions.find(session => session.path === file)
+  assert.equal(row.importable, false)
+  assert.equal(row.threadSource, 'guardian_review')
+  // Still listed: hiding it would make the count unexplainable.
+  assert.ok(row)
+})
+
+test('describe(): a long preamble is read again instead of leaving the row nameless', async () => {
+  // The cheap head is 8 KB; a real Codex rollout puts the first user message a
+  // median 153 KB in. One extra read must find the title.
+  const filler = JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>x</environment_context>' }] } })
+  const padding = `${filler}\n`.repeat(400) // ~ 100 KB of wrappers
+  const file = '/home/tester/.codex/sessions/deep.jsonl'
+  const body = `${JSON.stringify({ type: 'session_meta', payload: { session_id: 'deep' } })}\n`
+    + padding
+    + `${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Deep in the file.' }] } })}\n`
+  const transport = memoryTransport({ [file]: body })
+  const result = await scanMachine({ id: 'local' }, { transport, home: '/home/tester' })
+  const row = result.sessions.find(session => session.path === file)
+  assert.equal(row.title, 'Deep in the file.')
 })

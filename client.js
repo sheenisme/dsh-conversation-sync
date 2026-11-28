@@ -103,6 +103,8 @@ window.__ModuleLoader__.load({
   box-shadow:inset 0 0 0 .5px var(--dsw-alias-border-selected)}
 /* Already bound, but not the row the user is working on: present, dimmer, and
    marked, so it is obvious why pairing it again is allowed (that is a merge). */
+.cs-item.stub{opacity:.5;cursor:default;background:transparent}
+.cs-item.stub:hover{background:transparent}
 .cs-item.bound{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 7%,transparent)}
 .cs-item.bound .cs-itemTitle{color:var(--dsw-alias-label-secondary)}
 .cs-item.bound::before{content:'';position:absolute;left:6px;top:50%;width:4px;height:4px;margin-top:-2px;
@@ -239,6 +241,12 @@ window.__ModuleLoader__.load({
       // next to whatever the pointer is over instead of in a fixed corner.
       const [hover, setHover] = useState(null)
       const [keyEdit, setKeyEdit] = useState('')
+      // Codex records WHY a thread exists: a conversation the person started, an
+      // automated review of another thread, or a delegated worker. On one real
+      // machine 18 of 40 readable rollouts were automated, which is why the list
+      // looked like it held other people's work. Off by default; one click shows
+      // everything.
+      const [showAutomated, setShowAutomated] = useState(false)
       const [keyValue, setKeyValue] = useState('')
       const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
@@ -335,19 +343,27 @@ window.__ModuleLoader__.load({
       const rightTree = useMemo(() => {
         return machines.map(machine => {
           const sessions = cache.external?.[machine.id] ?? []
+          const automated = session => session.threadSource === 'guardian_review' || session.threadSource === 'subagent'
+          const shown = sessions.filter(session => showAutomated || !automated(session))
+          const hidden = sessions.length - shown.length
           const byKind = new Map()
-          for (const session of sessions) {
+          for (const session of shown) {
             if (!byKind.has(session.kind)) byKind.set(session.kind, [])
             byKind.get(session.kind).push(session)
           }
           return {
             machine,
-            total: sessions.length,
+            // Rows that cannot be imported are counted separately: a stub
+            // rollout is visible so it can be explained, but it must not
+            // inflate the number the user reads as "my conversations".
+            total: shown.filter(session => session.importable !== false).length,
+            stubs: shown.filter(session => session.importable === false).length,
+            hidden,
             errors: cache.errors?.[machine.id] ?? [],
             kinds: [...byKind.entries()].map(([kind, rows]) => ({ kind, rows })),
           }
         })
-      }, [machines, cache.external, cache.errors])
+      }, [machines, cache.external, cache.errors, showAutomated])
 
       const setPreference = async patch => {
         try {
@@ -560,7 +576,7 @@ window.__ModuleLoader__.load({
       const renderRight = () => {
         if (loading) return jsx('div', { className: 'cs-empty', children: t('panel.loading') })
         if (!rightTree.length) return jsx('div', { className: 'cs-empty', children: t('panel.noExternal') })
-        return rightTree.map(({ machine, total, errors, kinds }) => {
+        return rightTree.map(({ machine, total, stubs, hidden, errors, kinds }) => {
           const machineKey = `m:${machine.id}`
           const machineOpen = openGroups[machineKey] !== false
           const isSsh = machine.kind === 'ssh'
@@ -574,6 +590,18 @@ window.__ModuleLoader__.load({
                 children: jsxs('div', {
                   children: [
                     errors.length ? jsx('div', { className: 'cs-warn', style: { padding: '4px 6px 4px 20px' }, children: errors.join(' · ') }) : null,
+                    // Say why the visible row count and the clickable count differ,
+                    // otherwise "not importable" rows look like a bug.
+                    hidden ? jsx('div', {
+                      className: 'cs-itemMeta',
+                      style: { padding: '2px 6px 2px 20px' },
+                      children: format(t('panel.hiddenAutomated'), { count: hidden }),
+                    }) : null,
+                    stubs ? jsx('div', {
+                      className: 'cs-itemMeta',
+                      style: { padding: '2px 6px 2px 20px' },
+                      children: format(t('panel.stubs'), { count: stubs }),
+                    }) : null,
                     isSsh ? jsxs('div', {
                       className: 'cs-bar',
                       style: { padding: '2px 6px 4px 20px' },
@@ -635,9 +663,14 @@ window.__ModuleLoader__.load({
                             const selected = right?.machineId === machine.id && right?.path === session.path && right?.kind === kind
                             const boundTo = boundExternal(machine.id, session.path, kind)
                             const state = selected ? 'sel' : boundTo.length ? 'bound' : ''
+                            // A stub cannot be imported, so selecting it would only
+                            // produce an error on pairing. It stays visible (and
+                            // labelled) so the count is explainable, not clickable.
+                            const stub = session.importable === false
                             return jsxs('div', {
-                              className: `cs-item${state ? ` ${state}` : ''}`,
-                              onClick: () => setRight(selected ? null : { ...session, machineId: machine.id }),
+                              className: `cs-item${state ? ` ${state}` : ''}${stub ? ' stub' : ''}`,
+                              title: stub ? t('panel.stubHint') : undefined,
+                              onClick: stub ? undefined : () => setRight(selected ? null : { ...session, machineId: machine.id }),
                               role: 'button',
                               tabIndex: 0,
                               onKeyDown: event => { if (event.key === 'Enter') setRight({ ...session, machineId: machine.id }) },
@@ -652,9 +685,11 @@ window.__ModuleLoader__.load({
                                     // The internal path is the tool's own id; it stays
                                     // visible but secondary, because it is what the
                                     // binding is actually keyed on.
-                                    session.count !== undefined ? `${session.count} · ` : '',
-                                    shortId(session.path),
-                                    boundTo.length ? ` · ${t('panel.bound')}` : '',
+                                    stub ? t('panel.stub') : null,
+                                    stub ? '' : (session.count !== undefined ? `${session.count} · ` : ''),
+                                    stub ? '' : shortId(session.path),
+                                    stub ? '' : (boundTo.length ? ` · ${t('panel.bound')}` : ''),
+                                    stub ? '' : (session.threadSource && session.threadSource !== 'user' ? ` · ${session.threadSource}` : ''),
                                   ] }),
                                 ] }),
                               ],
@@ -799,6 +834,14 @@ window.__ModuleLoader__.load({
               onChange: e => void setPreference({ settingsEntry: e.target.checked }),
             }),
             t('panel.settingsEntry'),
+          ] }),
+          jsxs('label', { className: 'cs-check', title: t('panel.showAutomatedHint'), children: [
+            jsx('input', {
+              type: 'checkbox',
+              checked: showAutomated,
+              onChange: e => setShowAutomated(e.target.checked),
+            }),
+            t('panel.showAutomated'),
           ] }),
           jsx('span', { className: 'cs-spacer' }),
           jsx('button', {
@@ -1006,6 +1049,12 @@ window.__ModuleLoader__.load({
       'panel.setKey': 'Set key',
       'panel.keyPath': 'Private-key PATH on this machine (stored as a DSH credential). Point it at the .pub file to use ssh-agent.',
       'panel.bound': 'bound',
+      'panel.stub': 'no conversation (compacted)',
+      'panel.stubHint': 'This rollout holds no conversation text: Codex replaced it with an encrypted summary. It cannot be imported, so it is listed but not selectable.',
+      'panel.stubs': '{count} not importable',
+      'panel.showAutomated': 'automated threads',
+      'panel.showAutomatedHint': 'Also list threads Codex created for itself: guardian reviews and subagent workers. They hold real text but are not conversations you started.',
+      'panel.hiddenAutomated': '{count} automated thread(s) hidden',
       'panel.noPreview': 'No readable text yet.',
       'panel.kinds.claude': 'Claude Code',
       'panel.kinds.codex': 'Codex CLI',
@@ -1096,6 +1145,12 @@ window.__ModuleLoader__.load({
       'panel.setKey': '设置私钥',
       'panel.keyPath': '本机上的私钥文件路径（保存为 DSH 凭据）。指向 .pub 文件即可使用 ssh-agent。',
       'panel.bound': '已绑定',
+      'panel.stub': '无对话内容（已压缩）',
+      'panel.stubHint': '这个 rollout 里没有对话文本：Codex 已用加密摘要替换。它无法导入，因此只列出、不可选择。',
+      'panel.stubs': '{count} 个不可导入',
+      'panel.showAutomated': '自动线程',
+      'panel.showAutomatedHint': '同时列出 Codex 自己创建的线程：guardian 评审和子代理。它们有真实内容，但不是你发起的对话。',
+      'panel.hiddenAutomated': '已隐藏 {count} 个自动线程',
       'panel.noPreview': '暂时没有可读文本。',
       'panel.kinds.claude': 'Claude Code',
       'panel.kinds.codex': 'Codex CLI',

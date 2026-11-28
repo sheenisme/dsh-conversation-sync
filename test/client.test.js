@@ -191,3 +191,22 @@ test('client: the four buttons each perform their own pairing', async () => {
     assert.match(source, new RegExp(`onClick: \\(\\) => void pair\\('${direction}'\\)`))
   }
 })
+
+test('client: automated threads are hidden by default, with a way to see them', async () => {
+  // On a real machine 18 of 40 readable Codex rollouts were guardian reviews and
+  // subagent workers. Listing them beside the user's own conversations is why
+  // the list looked like it contained other people's work.
+  const { source } = await loadClient()
+  assert.match(source, /showAutomated/)
+  assert.match(source, /guardian_review/)
+  assert.match(source, /panel\.hiddenAutomated/)
+  // Default off.
+  assert.match(source, /useState\(false\)/)
+})
+
+test('client: a stub row cannot be selected, and the count says why', async () => {
+  const { source } = await loadClient()
+  assert.match(source, /session\.importable === false/)
+  assert.match(source, /stub \? undefined : \(\) => setRight/)
+  assert.match(source, /panel\.stubs/)
+})
