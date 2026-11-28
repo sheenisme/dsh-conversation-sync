@@ -1,155 +1,21 @@
 # dsh-conversation-sync
 
-[中文 README](README.zh-CN.md) · [Detailed docs](docs/DETAIL.md)
+[中文 README](README.zh-CN.md) · [UI guide](docs/UI.md) · [Detailed docs](docs/DETAIL.md)
 
 Import conversations into [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 from the tools you already use — and keep them in sync **both ways**, locally or
 over SSH.
 
+![Conversation sync](docs/intro.png)
+
 **Two headline features:**
 
 1. **Real bidirectional sync.** New messages on either side propagate to the
-   other automatically. You choose the direction per pair of sessions: import,
-   export, or both.
+   other. You choose the direction per pair of sessions: import, export, or
+   either of the two-sided modes.
 2. **Remote-SSH machines are first-class.** Sessions do not have to live on this
    machine. The plugin reads `~/.ssh/config` and treats the local machine, every
    SSH host, and every **jump host** as a source you can sync with.
-
-## UI at a glance
-
-The panel opens from **Settings → Conversation sync**, from the **sidebar icon**,
-or from **Plugins → Conversation sync**. Both entries are on by default and each
-has its own switch on the page (`Show this page in: ☑ left sidebar ☑ Settings`),
-so you can keep only the one you use.
-
-Two collapsible trees, side by side:
-
-- **Left — DSH:** workspace, then its sessions. The workspace is the top level
-  because a session does not record which profile opened it: the session header
-  has no such field and the sessions directory is shared by every profile, so
-  grouping by profile would be a guess. Workspace is also exactly how DSH's own
-  sidebar groups sessions.
-- **Right — machines:** machine, then tool, then its sessions. Each machine
-  shows its SSH key state inline (and lets you set it), plus any discovery
-  error, so an unreachable host explains itself instead of showing an empty list.
-
-Selecting one session on **each** side is what enables the buttons — that pair
-is the unit of work: the left session is what gets written or grown, the right
-one is the source or destination. A row reading **New session** on the left
-covers importing a conversation DSH has never seen.
-
-Then choose how the pair behaves. The arrows point at where the text goes, so a
-button never has to be decoded:
-
-| Button | What it does |
-| --- | --- |
-| **← Import into DSH** | Append the machine session into the selected DSH session. The machine file is not touched. |
-| **Export to machine →** | Append the DSH session into the selected machine file. DSH is not touched. |
-| **Each side catches up** ⇄ / **Newer copy wins** ⤵ (one segmented control) | The two-sided choice. *Catches up* runs both legs, always: each side receives what the other has and it does not, so running it twice adds nothing — this is the merge choice. *Newer copy wins* compares first and writes only the newer copy over the older one, doing nothing when the two are in step. |
-
-The two two-sided choices share **one segmented control plus a single Bind
-button**, because they differ only in what happens when both sides moved — a
-policy, not a different action.
-
-The group is framed and captioned because those four buttons act on the two
-selections above and on nothing else; they stay disabled until both exist.
-
-Each row in either tree shows its state at a glance: **selected** (accent
-outline), **already bound** (green tint and a dot), and **bound more than once**
-(a `×N` badge). A bound session does **not** disappear — binding one session to
-several sources is allowed on purpose, because that is how two conversations get
-merged into one.
-
-The right tree also carries a **New session on this machine** row inside every
-tool group. Sitting inside the group is what fixes the machine and the tool, so
-an impossible pair cannot be picked; the host then suggests a path inside that
-tool's own rollout directory (`~/.claude/projects/dsh-conversation-sync/…` and so
-on) so the next scan finds the file. A destination that does not exist yet can
-only receive an export — there is nothing to import from it.
-
-Bindings are listed at the bottom. The header carries a **select-all** switch
-(one round trip, so a fast double click cannot leave the table half-updated), a
-count of `checked/total`, and **Sync checked** — the batch button for everything
-that is ticked. Each row has:
-
-- a **checkbox** — only checked bindings are synced, by a bulk run or by
-  **Sync checked**;
-- a **direction** — `Each side catches up` (the default for a new binding), the
-  newer-wins comparison, or a pinned single leg;
-- the **newer side** at that moment, with the reason on hover;
-- **Sync now** (this row only) and **Remove**.
-
-There is deliberately **no automatic background sync**: every sync here writes
-into another tool's live files, so it happens when you ask for it.
-
-### The strip at the top
-
-Above the trees sits a quiet status strip: a coloured dot (green ready, blue
-working, red after a failure), the running plugin **version**, when this host
-started, and the last few lines of activity — every pairing, sync and removal
-writes one. The version matters more than it looks: the browser half reloads on
-refresh while the host keeps its old code until the app restarts, so a version
-older than the package you installed is the reason a new action answers
-`unknown action`.
-
-### Titles and previews
-
-A rollout is named by its tool, not by its content: a Claude file is a UUID and a
-Codex file is a rollout timestamp, so a list of them is a list of letters. Each
-row therefore shows the conversation's **title** — the first thing that was
-said — with the internal id kept underneath in small type, because that id is
-what a binding is keyed on.
-
-Hovering a row opens a card with the title, the tool, the message count, the
-machine and the time, plus the first few lines of **both sides** of the
-conversation. That is what makes two similar sessions distinguishable before one
-of them is bound.
-
-Titles travel with the conversation in both directions. DSH folds the latest
-`session/title` event, so a rename made in DSH is what gets exported; the title
-rides along on the exported lines as `dshTitle`, and an import restores it —
-including when the session is created for the first time.
-
-### Not every file is a conversation
-
-Codex writes three kinds of rollout into the same directory:
-
-| `thread_source` | what it is | shown |
-| --- | --- | --- |
-| `user` | a conversation you started | yes |
-| `guardian_review` | an automated review of another thread | only with **automated threads** ticked |
-| `subagent` | a worker thread delegated by another session | only with **automated threads** ticked |
-
-When Codex summarises a thread it replaces the body with an **encrypted**
-`compaction` payload and leaves three lines behind: metadata, that blob, and
-settings. Those files are listed but marked *no conversation (compacted)*, and
-they cannot be selected — so pairing can no longer fail with "no importable
-messages" after the fact. The machine header reports both counts, which is why
-the number of rows you can click can be smaller than the number of files on disk.
-
-Titles are also read from *deep* inside a file when necessary: Codex writes the
-environment, `AGENTS.md` and its own briefs into `role: "user"` messages before
-you type anything (a measured median of **153 KB** into a real rollout), so the
-cheap 8 KB head has no title in it. The scan fetches a wider window only for the
-files that need it, and text a tool put in the user seat (`<environment_context>`,
-`# AGENTS.md instructions`, `<external_ide_context>`, …) is never used as a name.
-
-### Which side is newer?
-
-Before anything is written, both sides are compared and the direction is derived
-from the comparison. The comparison is anchored on the **last sync**, not on a
-direct comparison of the two timestamps, because those two numbers mean
-different things: a DSH event's `time` is the conversation's own timestamp
-(importing a year-old rollout writes year-old stamps), while a file's `mtime` is
-when it landed on that disk (a copy makes ancient content look brand new).
-Comparing them directly calls a freshly copied old file "newer" forever, and the
-next automatic sync then re-imports it on every poll.
-
-Asking instead *did this side change since we last synced?* is symmetric and
-correct: a side that has not moved cannot hold anything the other is missing. The
-recorded stamps are the file's mtime and size, and the newest DSH event time at
-the moment the sync succeeded. An empty or missing source file is never "newer" —
-there is nothing to read from it — so the sync exports instead.
 
 ## Install
 
@@ -157,28 +23,25 @@ there is nothing to read from it — so the sync exports instead.
 dsh plugin --profile <name> add dsh-conversation-sync
 ```
 
-Or from the UI: **Plugins → Install bundle**, using this directory or the
-repository URL. The bundle ships its own `cordis.patch.yml`, so nothing in your
-profile manifest has to be edited by hand.
+Or from the UI: **Plugins → Install bundle**. The bundle ships its own
+`cordis.patch.yml`, so nothing in your profile manifest has to be edited by hand.
 
 ## Quick start
 
-1. Open the **Conversation sync** settings page.
-2. The machines row lists the local machine plus every host from
-   `~/.ssh/config`, jump hosts included. For an SSH machine, set the
-   **private-key path** once — it is stored as a DSH credential, never as plugin
-   config. If the key has a passphrase, point it at the matching `.pub` file and
-   authentication goes through `ssh-agent` instead.
-3. Pick a machine on the right; its sessions are discovered automatically.
-4. Select a session on each side, choose a direction, and the pair becomes an
-   active binding. Every import lands in one `会话同步` workspace, and a
-   remote session's title is prefixed with its machine (`BAAI-Ascend · ...`),
-   because DSH requires a session's working directory to equal its workspace
-   path — a per-machine folder would have to be its own workspace.
-
-   Sessions imported by an older build that *did* make one workspace per machine
-   are moved into `会话同步` on the next start, header included, so the storage
-   ends up as one folder either way.
+1. Open the panel: **Settings → Conversation sync**, the **sidebar icon**, or
+   **Plugins → Conversation sync** — both entries can be switched off
+   independently on the page itself.
+2. The right side lists the local machine plus every host from `~/.ssh/config`,
+   jump hosts included. For an SSH machine, set the **private-key path** once;
+   it is stored as a DSH credential, never as plugin config. Point it at the
+   matching `.pub` file to authenticate through `ssh-agent`.
+3. Select a session on **each** side — the left one is what gets written, the
+   right one is the source or destination — then choose how they behave.
+4. Every import lands in one `会话同步` workspace. A remote session's title is
+   prefixed with its machine (`BAAI-Ascend · …`), because DSH requires a
+   session's working directory to equal its workspace path; a per-machine folder
+   would have to be its own workspace. Sessions imported by an older build that
+   *did* create one workspace per machine are moved in on the next start.
 
 ## Supported sources
 
@@ -193,54 +56,28 @@ profile manifest has to be edited by hand.
 | Generic JSONL | any JSONL file with `role` and `content`/`text` per line |
 | DeepSeek export | web export ZIP (`export_format_version: 3`) |
 
-OpenCode and the DeepSeek export are **import-only** — OpenCode keeps sessions in
+OpenCode and the DeepSeek export are **import-only**: OpenCode keeps sessions in
 a live SQLite database, and an export ZIP is a snapshot rather than a
-conversation the tool can resume. The panel explains this instead of silently
-refusing.
+conversation the tool can resume.
 
-Per-format parsing details, quirks and filtering rules are in
-[docs/DETAIL.md](docs/DETAIL.md#supported-sources).
-
-## Before and after every sync
+## Safety
 
 Both directions go through the same three steps, so a sync either lands
 completely or not at all:
 
-1. **Pre-flight (read-only).** The plugin's data directory must be writable, the
-   source must be readable, the target DSH session must exist, and the direction
-   must be known. If any check fails the sync is refused *before* anything is
-   touched, and the reason names the check that failed.
-2. **Backup.** The external file is copied into
-   `~/.dsh/conversation-sync/backups/<binding>/`, and the DSH session's whole
-   on-disk directory is copied aside. Both copies are read back before the first
-   write — a backup that cannot be read is not a backup, so the sync aborts.
-3. **Verify, then roll back on failure.** After writing, both sides are read
-   again: the exported file must really end with the bytes that were written, and
-   an imported session must really contain readable messages. A mismatch is a
-   failure, and the previous state is restored from the backups.
-
-The DSH side is restored at file level (the session directory is copied back, or
-removed entirely when the sync created it), because `SessionPersistence` has no
-delete or truncate API — editing a live log through it would risk corruption.
-
-## When a sync fails
-
-Every external write is preceded by a backup, which is restored if anything goes
-wrong. The report tells you the reason and the concrete preconditions to satisfy
-before retrying — SSH key permissions, host reachability, writable paths, disk
-space, and so on. Nothing is left for you to guess.
+1. **Pre-flight (read-only).** Data directory writable, source readable, target
+   session present, direction known. A failed check refuses the sync *before*
+   anything is touched, and names the check.
+2. **Backup.** The external file and the DSH session's whole on-disk directory
+   are copied aside, then read back — a backup that cannot be read aborts the
+   sync.
+3. **Verify, then roll back.** After writing, both sides are read again. A
+   mismatch restores the previous state from the backups.
 
 > **Warning — exporting modifies live files.** Export appends messages to the
 > original tool's session files. Backups are taken before every write and
-> restored on failure, but data loss is still possible. Keep your own backups
-> and leave the export direction off for sources you cannot afford to lose.
-
-## Releasing
-
-A `v*` tag publishes automatically (`.github/workflows/publish.yml`) via npm
-Trusted Publishing — no token in the repo. It only works after a one-time
-*Trusted Publisher* entry is added on the package's npm settings page for this
-repository and workflow file.
+> restored on failure, but data loss is still possible. Leave the export
+> direction off for sources you cannot afford to lose.
 
 ## Development
 
@@ -248,15 +85,10 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-190 unit tests cover the pure modules — adapters, event building, `.ssh/config`
-parsing, discovery, rollback diagnostics and file-level session restore, host
-keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
-transport, the one-folder migration, and the browser half through a stub module
-loader. CI additionally installs the packed plugin into five real DSH releases
-and drives the actual RPC surface through eleven scenarios.
-
-See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job proves and how
-to run the harness locally.
+193 unit tests cover the pure modules; CI additionally installs the packed plugin
+into five real DSH releases and drives the actual RPC surface through twelve
+scenarios. See [docs/DETAIL.md](docs/DETAIL.md#testing) for what each CI job
+proves and how to run the harness locally.
 
 ## License
 
@@ -264,19 +96,19 @@ to run the harness locally.
 
 ## Acknowledgements
 
-This plugin stands on work done by others. In particular:
-
 - **[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)** (MIT) —
-  the host itself. Its official `dsh-deepseek-chat-import` plugin and the session
-  format packages were the reference for event shapes, the `tool/call` →
-  `tool/result` lifecycle, and how a plugin registers a web route.
+  the host. Its official `dsh-deepseek-chat-import` plugin and the session format
+  packages were the reference for event shapes, the `tool/call` → `tool/result`
+  lifecycle, and how a plugin registers a web route.
 - **[dsh-remote](https://github.com/sheenisme/dsh-remote)** (MIT) — the model for
-  the SSH layer. Connection pooling, host-key fingerprinting of the raw key blob,
-  the `PreferredKeyAgent` ordering that avoids tripping `MaxAuthTries`, and
-  failure classification with actionable hints all came from studying it.
-- **[dsh-chat-import](https://github.com/Nwflower/dsh-chat-import)** (MIT) — an
-  earlier and much broader importer, and the reference for how a DSH import
-  plugin materializes sessions through `sessionPersistence`.
+  the SSH layer: connection pooling, host-key fingerprinting, the key ordering
+  that avoids tripping `MaxAuthTries`, and failure classification with actionable
+  hints.
+- **[dsh-chat-import](https://github.com/Nwflower/dsh-chat-import)** (MIT) — the
+  reference for materializing sessions through `sessionPersistence`.
+- **[DeepSeek Balance Whale Widget](https://github.com/meteornox/deepseek-balance-whale-widget)** — the
+  small whale in the cover image. Its `assets/` art is provided as-is and is
+  **not** MIT-licensed; it is used here unmodified, with thanks, and will be
+  removed on request.
 - **[dsh-plugin-cc](https://github.com/cpj-dev/dsh-plugin-cc)** (MIT) — a clean
-  example of a bundle's shape (`cordis.patch.yml`, client module, locale
-  registration) and of how to structure tests around a DSH plugin.
+  example of a bundle's shape and of how to test a DSH plugin.

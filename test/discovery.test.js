@@ -251,3 +251,48 @@ test('describe(): a long preamble is read again instead of leaving the row namel
   const row = result.sessions.find(session => session.path === file)
   assert.equal(row.title, 'Deep in the file.')
 })
+
+test('describe(): a title is cut at a boundary and says so', async () => {
+  // A hard slice produced "...share a workspace, and", which reads as a
+  // truncated file rather than a shortened label.
+  const { shortenTitle } = await import('../lib/discovery.js')
+  const long = 'You are Codex, an agent based on GPT-6. You and the user share a workspace, and everything you do must stay inside it.'
+  const cut = shortenTitle(long, 80)
+  assert.ok(cut.length <= 81, `title should fit the budget, got ${cut.length}`)
+  assert.ok(cut.endsWith('…'), 'a shortened title must say it was shortened')
+  assert.doesNotMatch(cut, /\s…$/, 'no dangling space before the ellipsis')
+  // A clause boundary is preferred, and a dangling connective is trimmed.
+  assert.match(cut, /workspace…$/)
+  assert.doesNotMatch(cut, /\band…$/)
+  assert.equal(shortenTitle('short one', 80), 'short one')
+})
+
+test('describe(): a system prompt in the user seat is not a title', async () => {
+  const file = '/home/tester/.claude/projects/p/s.jsonl'
+  const transport = memoryTransport({
+    [file]: [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'You are Codex, an agent based on GPT-6. You and the user share a workspace.' }] } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<system-reminder>\ncontext here\n</system-reminder>' }] } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '# Workflow authoring reference\n\nA workflow structures work.\n\nMore prose.' }] } }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '请你清理之前 pip 的缓存' }] } }),
+    ].join('\n') + '\n',
+  })
+  const result = await scanMachine({ id: 'local' }, { transport, home: '/home/tester' })
+  const row = result.sessions.find(session => session.path === file)
+  assert.equal(row.title, '请你清理之前 pip 的缓存')
+})
+
+test('describe(): the first real prompt can sit megabytes into the file', async () => {
+  // A real Claude Code session spent its first megabyte on tool output and skill
+  // documents; its first genuine prompt was at byte 1,095,161, past both the 8 KB
+  // and 256 KB windows. One probe at a deeper offset has to find it.
+  const file = '/home/tester/.claude/projects/p/deep.jsonl'
+  const noise = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<task-notification>noise</task-notification>' }] } })
+  const filler = `${noise}\n`.repeat(9000) // ~ 1 MB
+  const body = filler
+    + `${JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'Deep prompt found.' }] } })}\n`
+  const transport = memoryTransport({ [file]: body })
+  const result = await scanMachine({ id: 'local' }, { transport, home: '/home/tester' })
+  const row = result.sessions.find(session => session.path === file)
+  assert.equal(row.title, 'Deep prompt found.')
+})

@@ -11,6 +11,7 @@ import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
 import { createHostKeyGuard } from './lib/hostkey.js'
 import { scanMachine } from './lib/discovery.js'
+import { shortenTitle } from './lib/discovery.js'
 import { listDshSessions, readDshSessionMessages, readDshSessionTitle, dshSessionExists, countDshEvents, inspectDshLog } from './lib/dsh-sessions.js'
 import { compareSides, resolveDirection } from './lib/newer.js'
 import { SyncRollback, diagnoseFailure, preflight } from './lib/rollback.js'
@@ -283,8 +284,8 @@ export async function apply(ctx, config = {}) {
    */
   const titleFromRecords = records => {
     const said = records.find(record => record.role === 'user' && String(record.text ?? '').trim())
-    const text = String(said?.text ?? '').replace(/\s+/g, ' ').trim()
-    return text ? text.slice(0, 60) : ''
+    // Same rule as the browser side: never cut a word in half, and mark it.
+    return said ? shortenTitle(said.text, 60) : ''
   }
 
   const titledFor = (binding, title, records) => {
@@ -1031,7 +1032,10 @@ export async function apply(ctx, config = {}) {
         const raw = body.binding ?? {}
         const binding = bindingSchema.parse({
           ...raw,
-          id: raw.id || `bnd-${randomUUID()}`,
+          // A short, stable, human-quotable handle. The binding list shows it so
+          // two bindings on the same session can be told apart without reading
+          // paths; a UUID is 36 characters of noise in a table cell.
+          id: raw.id || `bnd-${randomUUID().replace(/-/g, '').slice(0, 8)}`,
           name: raw.name || raw.externalPath || 'Untitled binding',
         })
         if (!binding.externalPath) return Response.json({ error: 'an external path is required' }, { status: 400 })

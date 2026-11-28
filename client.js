@@ -159,6 +159,10 @@ window.__ModuleLoader__.load({
 .cs-table tr:last-child td{border-bottom:none}
 .cs-table tr.off td{opacity:.55}
 .cs-name{display:flex;flex-direction:column;gap:1px;min-width:0}
+.cs-nameHead{display:flex;align-items:center;gap:6px;min-width:0}
+.cs-id{flex:0 0 auto;padding:0 5px;border-radius:var(--dsw-radius-xs);font-family:var(--ds-font-family-code,monospace);
+  font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);
+  background:var(--dsw-alias-bg-module-platform);border:.5px solid var(--dsw-alias-border-l2)}
 .cs-nameTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px;color:var(--dsw-alias-label-primary)}
 .cs-nameMeta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px;font-size:11px;
   color:var(--dsw-alias-label-tertiary)}
@@ -732,7 +736,13 @@ window.__ModuleLoader__.load({
                     onChange: e => void updateBinding(binding.id, { checked: e.target.checked }),
                   }) }),
                   jsx('td', { children: jsxs('div', { className: 'cs-name', children: [
-                    jsx('span', { className: 'cs-nameTitle', title: binding.name, children: binding.name }),
+                    jsxs('div', { className: 'cs-nameHead', children: [
+                      // A short handle, so two bindings that touch the same
+                      // conversation can be told apart at a glance and quoted
+                      // when something goes wrong.
+                      jsx('span', { className: 'cs-id', title: binding.id, children: shortId(binding.id) }),
+                      jsx('span', { className: 'cs-nameTitle', title: binding.name, children: binding.name }),
+                    ] }),
                     jsx('span', { className: 'cs-nameMeta', title: binding.externalPath, children: `${binding.machineId} · ${binding.externalPath}` }),
                     state?.lastFailure
                       ? jsxs('span', { className: 'cs-nameMeta', style: { color: 'var(--dsw-alias-state-error-primary)' }, children: `${t('panel.failure')} ${state.lastFailure.reason}` })
