@@ -43,6 +43,42 @@ test('scanMachine(): finds Claude/Codex/DeepSeek roots with metadata', async () 
   assert.equal(codex.preview, 'hello codex')
 })
 
+test('scanMachine(): a session carries a human title and a readable preview', async () => {
+  // A rollout is named after a UUID or a timestamp, which tells a reader
+  // nothing. The title is the first thing the user said; the preview shows a
+  // few lines of both sides so two similar sessions can be told apart.
+  const home = '/home/tester'
+  const t = memoryTransport({
+    [`${home}/.claude/projects/proj/uuid-1234.jsonl`]:
+      '{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"text","text":"Refactor the tokenizer"}]}}\n' +
+      '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I will split it out."}]}}\n' +
+      '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Also add a test"}]}}\n',
+  })
+  const { sessions } = await scanMachine({ id: 'local' }, { transport: t, home })
+  const session = sessions.find(s => s.kind === 'claude')
+  // The name is the tool's own session id (here `sessionId` from the rollout,
+  // normally a UUID); the file stem is only a fallback.
+  assert.equal(session.name, 's1', 'the internal id is still the name')
+  assert.equal(session.title, 'Refactor the tokenizer')
+  assert.match(session.preview, /Refactor the tokenizer/)
+  assert.match(session.preview, /I will split it out\./)
+  assert.match(session.preview, /Also add a test/)
+})
+
+test('scanMachine(): a rollout with no readable text still lists, with an empty preview', async () => {
+  const home = '/home/tester'
+  const t = memoryTransport({
+    [`${home}/.codex/sessions/2026/01/01/rollout-y.jsonl`]:
+      '{"type":"session_meta","payload":{"session_id":"thread-2"}}\n' +
+      '{"type":"response_item","payload":{"type":"compaction","encrypted_content":"gAAAA"}}\n',
+  })
+  const { sessions, errors } = await scanMachine({ id: 'local' }, { transport: t, home })
+  assert.deepEqual(errors, [])
+  const session = sessions.find(s => s.kind === 'codex')
+  assert.equal(session.title, '')
+  assert.equal(session.preview, '')
+})
+
 test('scanMachine(): absent tool roots are silent, not errors', async () => {
   // A machine that simply runs none of these tools must not look broken: only
   // real failures (permissions, IO) are surfaced to the user.

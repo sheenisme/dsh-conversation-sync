@@ -60,9 +60,25 @@ async function importFile(rpc, args, { kind, file }, extra = {}) {
 
 const scenarios = {
   async import(args, rpc) {
-    const { row, imported } = await importFile(rpc, args, FORMATS[0])
+    const { row, imported, binding } = await importFile(rpc, args, FORMATS[0])
     assert(/List the files/.test(row.preview ?? ''), `preview lost the user text: ${row.preview}`)
-    log(`import ok: ${imported} record(s), ${row.count} message(s)`)
+    // A session's name is what a person picks it by, so an import must not
+    // leave it as a bare filename.
+    assert(row.title && row.title !== row.id, `import left the session unnamed: ${JSON.stringify(row.title)}`)
+    assert(!row.title.includes('/'), `the session is still named after its path: ${JSON.stringify(row.title)}`)
+    // The external row is what the user chooses from, so it needs a readable
+    // title and a preview too, not just a UUID. A fixture outside the tool
+    // roots is never scanned, so one is placed where a real rollout lives.
+    const scanned = path.join(args.home, '.claude', 'projects', 'proj', 'scanned.jsonl')
+    await fs.mkdir(path.dirname(scanned), { recursive: true })
+    await fs.copyFile(path.join(args.fixtures, FORMATS[0].file), scanned)
+    const listing = await rpc({ action: 'sessions', force: true })
+    const external = (listing.external?.local ?? []).find(item => item.path === scanned)
+    assert(external, `the scanned file is missing from the external list: ${JSON.stringify((listing.external?.local ?? []).map(i => i.path))}`)
+    assert(external.title, `the external row has no title: ${JSON.stringify(external)}`)
+    assert((external.preview ?? '').includes('\n'), `the external preview shows only one line: ${JSON.stringify(external.preview)}`)
+    assert(external.title !== external.name, `the row is still named by its id: ${external.title}`)
+    log(`import ok: ${imported} record(s), ${row.count} message(s), title "${row.title}"`)
     return { imported, messages: row.count }
   },
 

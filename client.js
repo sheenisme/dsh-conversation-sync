@@ -61,19 +61,6 @@ window.__ModuleLoader__.load({
 .cs-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 /* A framed group so it is clear the buttons inside act on the two selections
    above and on nothing else. */
-/* A segmented control: one control, two choices, the selected half raised.
-   Apple's segmented control, not two buttons that look unrelated. */
-.cs-seg{display:inline-flex;padding:2px;gap:2px;border-radius:var(--dsw-radius-sm);
-  background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2)}
-.cs-segBtn{height:26px;padding:0 10px;font:inherit;font-size:12px;line-height:18px;cursor:pointer;
-  color:var(--dsw-alias-label-secondary);background:transparent;border:none;
-  border-radius:calc(var(--dsw-radius-sm) - 2px);transition:background var(--ds-transition-duration) var(--ds-ease-in-out),
-  color var(--ds-transition-duration) var(--ds-ease-in-out)}
-.cs-segBtn:hover:not(:disabled):not(.on){color:var(--dsw-alias-label-primary);
-  background:var(--dsw-alias-interactive-bg-hover)}
-.cs-segBtn.on{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);
-  box-shadow:var(--dsw-shadow-lv1);font-weight:500}
-.cs-segBtn:disabled{opacity:.45;cursor:not-allowed}
 .cs-actionBar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 12px;
   border:.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);
   background:var(--dsw-alias-bg-layer-3)}
@@ -135,6 +122,17 @@ window.__ModuleLoader__.load({
   background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent);border-color:transparent}
 .cs-tag.busy{color:var(--dsw-alias-state-business-primary);
   background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 10%,transparent);border-color:transparent}
+.cs-hover{position:fixed;z-index:60;width:320px;max-height:260px;overflow:hidden;padding:10px 12px;
+  border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);
+  border:.5px solid var(--dsw-alias-border-l2);box-shadow:var(--dsw-shadow-lv2);
+  pointer-events:none;display:flex;flex-direction:column;gap:6px}
+.cs-hoverTitle{font-size:12px;font-weight:600;line-height:18px;color:var(--dsw-alias-label-primary);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cs-hoverMeta{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-hoverBody{margin:0;font-size:11px;line-height:17px;color:var(--dsw-alias-label-secondary);
+  white-space:pre-wrap;display:-webkit-box;-webkit-line-clamp:8;-webkit-box-orient:vertical;overflow:hidden}
+.cs-hoverEmpty{font-size:11px;line-height:17px;color:var(--dsw-alias-label-tertiary)}
 .cs-empty{padding:10px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .cs-note{padding:8px 10px;border-radius:var(--dsw-radius-sm);font-size:12px;line-height:18px;
   background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary)}
@@ -237,6 +235,9 @@ window.__ModuleLoader__.load({
       const [left, setLeft] = useState('')
       const [right, setRight] = useState(null)
       const [openGroups, setOpenGroups] = useState({})
+      // The hover card is positioned from the row's own rectangle, so it lands
+      // next to whatever the pointer is over instead of in a fixed corner.
+      const [hover, setHover] = useState(null)
       const [keyEdit, setKeyEdit] = useState('')
       const [keyValue, setKeyValue] = useState('')
       const [error, setError] = useState('')
@@ -248,9 +249,6 @@ window.__ModuleLoader__.load({
       const [loading, setLoading] = useState(true)
       const [prefs, setPrefs] = useState({ sidebarEntry: true, settingsEntry: true })
       const [status, setStatus] = useState({})
-      // Which half of the two-sided segmented control the next pairing uses.
-      // Not a stored binding field: it only decides what the button does now.
-      const [bothMode, setBothMode] = useState('both')
 
       const load = useCallback(async (force = false) => {
         try {
@@ -288,6 +286,22 @@ window.__ModuleLoader__.load({
       const boundExternal = (machineId, sessionPath, kind) =>
         bindings.filter(b => b.externalPath === sessionPath && b.machineId === machineId && (!kind || b.kind === kind))
       const toggleGroup = key => setOpenGroups(prev => ({ ...prev, [key]: prev[key] === false }))
+
+      // A row's `name` is the tool's own id (a UUID, or a rollout timestamp),
+      // which tells a reader nothing. The card shows the title and the first
+      // few lines instead, so two similar sessions can be told apart.
+      const hoverProps = session => ({
+        onMouseEnter: event => {
+          const rect = event.currentTarget.getBoundingClientRect()
+          const below = window.innerHeight - rect.bottom > 280
+          setHover({
+            session,
+            left: Math.min(rect.left, Math.max(8, window.innerWidth - 336)),
+            top: below ? rect.bottom + 6 : Math.max(8, rect.top - 268),
+          })
+        },
+        onMouseLeave: () => setHover(null),
+      })
 
       // LEFT TREE: workspace → session. A session cannot name its profile (the
       // session header has no such field, and the sessions directory never
@@ -523,9 +537,10 @@ window.__ModuleLoader__.load({
                   role: 'button',
                   tabIndex: 0,
                   onKeyDown: event => { if (event.key === 'Enter') setLeft(session.id) },
+                  ...hoverProps(session),
                   children: [
                     jsxs('div', { className: 'cs-itemMain', children: [
-                      jsxs('div', { className: 'cs-itemTitle', title: titleOf(session), children: [
+                      jsxs('div', { className: 'cs-itemTitle', children: [
                         titleOf(session),
                         boundTo.length > 1 ? jsx('span', { className: 'cs-badge', title: t('panel.multiBound'), children: `×${boundTo.length}` }) : null,
                       ] }),
@@ -626,15 +641,19 @@ window.__ModuleLoader__.load({
                               role: 'button',
                               tabIndex: 0,
                               onKeyDown: event => { if (event.key === 'Enter') setRight({ ...session, machineId: machine.id }) },
+                              ...hoverProps(session),
                               children: [
                                 jsxs('div', { className: 'cs-itemMain', children: [
-                                  jsxs('div', { className: 'cs-itemTitle', title: titleOf(session), children: [
+                                  jsxs('div', { className: 'cs-itemTitle', children: [
                                     titleOf(session),
                                     boundTo.length > 1 ? jsx('span', { className: 'cs-badge', title: t('panel.multiBound'), children: `×${boundTo.length}` }) : null,
                                   ] }),
                                   jsxs('div', { className: 'cs-itemMeta', children: [
+                                    // The internal path is the tool's own id; it stays
+                                    // visible but secondary, because it is what the
+                                    // binding is actually keyed on.
                                     session.count !== undefined ? `${session.count} · ` : '',
-                                    session.path,
+                                    shortId(session.path),
                                     boundTo.length ? ` · ${t('panel.bound')}` : '',
                                   ] }),
                                 ] }),
@@ -753,12 +772,15 @@ window.__ModuleLoader__.load({
       ] })
 
       return jsxs('div', { className: 'cs-root', children: [
-        infoBar,
-
         jsxs('div', { className: 'cs-head', children: [
           jsx('h3', { className: 'cs-title', children: t('panel.title') }),
           jsx('p', { className: 'cs-sub', children: t('panel.subtitle') }),
         ] }),
+
+        // Directly under the explanation, above the view switches: it answers
+        // "what is this build, and what did the last click do" before anything
+        // else on the page.
+        infoBar,
 
         jsxs('div', { className: 'cs-bar', children: [
           jsx('span', { className: 'cs-sub', children: t('panel.placement') }),
@@ -839,31 +861,21 @@ window.__ModuleLoader__.load({
               onClick: () => void pair('out'),
               children: t('panel.export'),
             }),
-            // The two-sided choices are one control with two halves: they only
-            // differ in what happens when both sides moved, which is a policy,
-            // not a different action.
-            jsxs('div', { className: 'cs-seg', children: [
-              jsx('button', {
-                className: `cs-segBtn${bothMode === 'both' ? ' on' : ''}`,
-                disabled: busy || !left || !right,
-                title: t('panel.bothHint'),
-                onClick: () => setBothMode('both'),
-                children: t('panel.segCatchUp'),
-              }),
-              jsx('button', {
-                className: `cs-segBtn${bothMode === 'auto' ? ' on' : ''}`,
-                disabled: busy || !left || !right,
-                title: t('panel.autoPairHint'),
-                onClick: () => setBothMode('auto'),
-                children: t('panel.segNewer'),
-              }),
-            ] }),
+            // One button per action, each labelled with what it does. Four
+            // functions, four buttons - no intermediate "choose then apply".
             jsx('button', {
               className: 'cs-btn',
               disabled: busy || !left || !right,
-              title: bothMode === 'both' ? t('panel.bothHint') : t('panel.autoPairHint'),
-              onClick: () => void pair(bothMode),
-              children: `${t('panel.pairNow')} ⇄`,
+              title: t('panel.bothHint'),
+              onClick: () => void pair('both'),
+              children: t('panel.bidirectional'),
+            }),
+            jsx('button', {
+              className: 'cs-btn',
+              disabled: busy || !left || !right,
+              title: t('panel.autoPairHint'),
+              onClick: () => void pair('auto'),
+              children: t('panel.autoPair'),
             }),
           ] }),
         ] }),
@@ -895,6 +907,23 @@ window.__ModuleLoader__.load({
         ] }),
 
         jsx('div', { className: 'cs-warn', children: t('panel.warnings.writeBack') }),
+
+        hover ? jsxs('div', {
+          className: 'cs-hover',
+          style: { left: hover.left, top: hover.top },
+          children: [
+            jsx('div', { className: 'cs-hoverTitle', children: titleOf(hover.session) }),
+            jsxs('div', { className: 'cs-hoverMeta', children: [
+              t(`panel.kinds.${hover.session.kind}`),
+              hover.session.count !== undefined ? ` · ${hover.session.count}` : '',
+              hover.session.machineId ? ` · ${hover.session.machineId}` : '',
+              hover.session.mtimeMs ? ` · ${new Date(hover.session.mtimeMs).toLocaleString()}` : '',
+            ] }),
+            hover.session.preview
+              ? jsx('pre', { className: 'cs-hoverBody', children: hover.session.preview })
+              : jsx('div', { className: 'cs-hoverEmpty', children: t('panel.noPreview') }),
+          ],
+        }) : null,
       ] })
     }
 
@@ -902,7 +931,7 @@ window.__ModuleLoader__.load({
       summary: 'Conversation sync',
       'settings.nav': 'Conversation sync',
       'panel.title': 'Conversation sync',
-      'panel.subtitle': 'Left: DSH sessions grouped by workspace. Right: machines, each tool, and its sessions. Select one on each side to bind them.',
+      'panel.subtitle': 'Left: DSH sessions, grouped by workspace. Right: machines, and under each machine the tools, and under each tool its sessions. Pick one on each side to bind them, then sync the bound conversation.',
       'panel.working': 'Working…',
       'panel.syncing': 'Syncing…',
       'panel.scanning': 'Scanning machines…',
@@ -922,8 +951,8 @@ window.__ModuleLoader__.load({
       'panel.externalColumn': 'External sessions',
       'panel.import': '← Import into DSH',
       'panel.export': 'Export to machine →',
-      'panel.bidirectional': 'Both ways ⇄',
-      'panel.autoPair': 'Newer side wins ⤵',
+      'panel.bidirectional': 'Each side catches up ⇄',
+      'panel.autoPair': 'Newer copy wins ⤵',
       'panel.arrowsHint': 'The arrow points at where the text goes: ← into the selected DSH session, → out to the selected machine file.',
       'panel.pairScope': 'Create a binding from the two selections',
       'panel.importHint': 'Append the machine session into the selected DSH session. Nothing is written to the machine.',
@@ -977,6 +1006,7 @@ window.__ModuleLoader__.load({
       'panel.setKey': 'Set key',
       'panel.keyPath': 'Private-key PATH on this machine (stored as a DSH credential). Point it at the .pub file to use ssh-agent.',
       'panel.bound': 'bound',
+      'panel.noPreview': 'No readable text yet.',
       'panel.kinds.claude': 'Claude Code',
       'panel.kinds.codex': 'Codex CLI',
       'panel.kinds.workbuddy': 'WorkBuddy / CodeBuddy',
@@ -991,7 +1021,7 @@ window.__ModuleLoader__.load({
       summary: '会话同步',
       'settings.nav': '会话同步',
       'panel.title': '会话同步',
-      'panel.subtitle': '左侧：DSH 会话，按工作区分组。右侧：机器 → 工具 → 会话。左右各选一个即可建立绑定。',
+      'panel.subtitle': '左侧：DSH 会话，按工作区分组。右侧：机器，每台机器下面是它的各种工具，每个工具下面是它的会话。左右各选一个即可建立绑定，并对绑定的会话进行同步。',
       'panel.working': '处理中……',
       'panel.syncing': '正在同步……',
       'panel.scanning': '正在扫描机器……',
@@ -1011,8 +1041,8 @@ window.__ModuleLoader__.load({
       'panel.externalColumn': '外部会话',
       'panel.import': '← 导入到 DSH',
       'panel.export': '导出到机器 →',
-      'panel.bidirectional': '双向 ⇄',
-      'panel.autoPair': '以较新一侧为准 ⤵',
+      'panel.bidirectional': '两边互相补齐 ⇄',
+      'panel.autoPair': '较新的覆盖较旧的 ⤵',
       'panel.arrowsHint': '箭头指向文字的去处：← 写入选中的 DSH 会话，→ 写入选中的机器文件。',
       'panel.pairScope': '用左右两个选择建立绑定',
       'panel.importHint': '把机器上的会话追加进选中的 DSH 会话。不会改动机器上的文件。',
@@ -1066,6 +1096,7 @@ window.__ModuleLoader__.load({
       'panel.setKey': '设置私钥',
       'panel.keyPath': '本机上的私钥文件路径（保存为 DSH 凭据）。指向 .pub 文件即可使用 ssh-agent。',
       'panel.bound': '已绑定',
+      'panel.noPreview': '暂时没有可读文本。',
       'panel.kinds.claude': 'Claude Code',
       'panel.kinds.codex': 'Codex CLI',
       'panel.kinds.workbuddy': 'WorkBuddy / CodeBuddy',

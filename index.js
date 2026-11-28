@@ -11,7 +11,7 @@ import { buildEvents, toLiveInput } from './lib/events.js'
 import { discoverMachines } from './lib/sshconfig.js'
 import { createHostKeyGuard } from './lib/hostkey.js'
 import { scanMachine } from './lib/discovery.js'
-import { listDshSessions, readDshSessionMessages, dshSessionExists, countDshEvents, inspectDshLog } from './lib/dsh-sessions.js'
+import { listDshSessions, readDshSessionMessages, readDshSessionTitle, dshSessionExists, countDshEvents, inspectDshLog } from './lib/dsh-sessions.js'
 import { compareSides, resolveDirection } from './lib/newer.js'
 import { SyncRollback, diagnoseFailure, preflight } from './lib/rollback.js'
 import { migrateIntoSyncWorkspace } from './lib/dsh-migrate.js'
@@ -273,9 +273,26 @@ export async function apply(ctx, config = {}) {
 
   /** `BAAI-Ascend · <title>` — the only per-machine grouping DSH permits. */
   const machineLabel = machineId => machineById(machineId)?.label ?? machineId
-  const titledFor = (binding, title) => {
+  /**
+   * A readable name for an imported conversation.
+   *
+   * The caller's title wins (an export carried it, or the panel passed the
+   * session's own title). Otherwise the first thing the user said is used,
+   * because a rollout's filename - a UUID, or a timestamp - is what a person
+   * is trying to get away from when they open this page.
+   */
+  const titleFromRecords = records => {
+    const said = records.find(record => record.role === 'user' && String(record.text ?? '').trim())
+    const text = String(said?.text ?? '').replace(/\s+/g, ' ').trim()
+    return text ? text.slice(0, 60) : ''
+  }
+
+  const titledFor = (binding, title, records) => {
     const label = machineLabel(binding.machineId)
-    const base = String(title ?? '').trim() || path.posix.basename(binding.externalPath) || binding.name
+    const base = String(title ?? '').trim()
+      || titleFromRecords(records ?? [])
+      || path.posix.basename(binding.externalPath)
+      || binding.name
     if (binding.machineId === 'local') return base
     return base.startsWith(`${label} · `) ? base : `${label} · ${base}`
   }
@@ -292,7 +309,7 @@ export async function apply(ctx, config = {}) {
       isSeeded: false,
     }
     const events = buildEvents(records, { createId: randomUUID })
-    const named = titledFor(binding, title)
+    const named = titledFor(binding, title, records)
     if (named) {
       events.push({
         type: 'session/title',
@@ -390,7 +407,7 @@ export async function apply(ctx, config = {}) {
         return 0
       }
       if (!binding.dshSessionIds.length) {
-        const created = await createSession(binding, state, delta.records, binding.name)
+        const created = await createSession(binding, state, delta.records, undefined)
         binding.dshSessionIds.push(created.id)
         state.dshSeqs[created.id] = created.lastSeq
         await bindingsTable.put(binding.id, binding)
@@ -404,6 +421,8 @@ export async function apply(ctx, config = {}) {
 
     const delta = await readJsonlDelta(transport, binding.externalPath, binding.kind, state.cursor)
     if (delta.absent) throw new Error(`source file not found: ${binding.externalPath}`)
+    // A title written by an earlier export travels back with the conversation.
+    const carried = delta.records.find(record => record.meta?.title)?.meta?.title
     if (!binding.dshSessionIds.length) {
       // An empty source used to materialize an empty DSH session: a session
       // title with no conversation in it, which looks like a successful import
@@ -414,7 +433,7 @@ export async function apply(ctx, config = {}) {
           'Compacted or metadata-only rollouts carry no conversation text; pick a session that has messages.',
         )
       }
-      const created = await createSession(binding, state, delta.records, binding.name)
+      const created = await createSession(binding, state, delta.records, carried)
       binding.dshSessionIds.push(created.id)
       state.dshSeqs[created.id] = created.lastSeq
       await bindingsTable.put(binding.id, binding)
@@ -438,12 +457,16 @@ export async function apply(ctx, config = {}) {
     }
     let written = 0
     let content = ''
+    let title
     for (const sessionId of binding.dshSessionIds) {
       // A stale or mistyped session id used to read back as zero messages and
       // report a successful sync that wrote nothing. Fail with the reason.
       if (!(await dshSessionExists({ persistence, sessions: sessionStore, sessionId }))) {
         throw new Error(`DSH session ${sessionId} does not exist; re-select it on the left`)
       }
+      // The title is part of the conversation, so it travels with the messages:
+      // renamed in DSH, the next export carries the new name out.
+      title ??= await readDshSessionTitle({ persistence, sessions: sessionStore, sessionId })
       const fromSeq = state.outSeqs?.[sessionId] ?? 0
       const messages = await readDshSessionMessages({ persistence, sessions: sessionStore, sessionId, fromSeq, strict: true })
       for (const message of messages) {
@@ -453,6 +476,7 @@ export async function apply(ctx, config = {}) {
           binding.kind,
           { role: message.role, text, ts: message.time },
           `dsh:${sessionId}:${message.seq}`,
+          title,
         )
       }
       if (messages.length) {

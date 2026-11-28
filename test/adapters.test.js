@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { textOf, adapterFor, readJsonlDelta, renderExternalLine } from '../lib/adapters.js'
+import { textOf, adapterFor, readJsonlDelta, renderExternalLine, titleFromLine } from '../lib/adapters.js'
 import { memoryTransport } from './helpers.js'
 
 const meta = { byteOffset: 0 }
@@ -240,4 +240,49 @@ test('antigravity: render writes the USER_REQUEST wrapper and is echo-safe', () 
   const row = adapterFor('antigravity').parse(JSON.stringify(foreign), meta)
   assert.equal(row.text, 'hello')
   assert.equal(row.role, 'user')
+})
+
+test('renderExternalLine(): the DSH title travels with the conversation', () => {
+  // A title is part of a conversation, not decoration: a rename in DSH has to
+  // reach the other tool, and an import has to restore it.
+  for (const kind of ['claude', 'codex', 'workbuddy', 'trae', 'antigravity', 'jsonl']) {
+    const line = renderExternalLine(kind, { role: 'user', text: 'hello', ts: 1_700_000_000_000 }, 'dsh:x:1', 'Renamed in DSH')
+    assert.equal(titleFromLine(line), 'Renamed in DSH', `${kind} lost the title`)
+    // Our own line is deliberately NOT parsed back into a record: that echo
+    // guard is what stops an export from being re-imported as new content.
+    assert.equal(adapterFor(kind).parse(line, { byteOffset: 0 }), undefined, `${kind} lost its echo guard`)
+  }
+})
+
+test('titleFromLine(): a line without a title is not parsed at all', () => {
+  // A scan reads thousands of lines from tools that know nothing about DSH
+  // titles, so the marker is checked before any JSON work.
+  assert.equal(titleFromLine('{"type":"user","message":{}}'), undefined)
+  assert.equal(titleFromLine('not json at all'), undefined)
+  assert.equal(titleFromLine('{"dshTitle":""}'), undefined)
+  assert.equal(titleFromLine('{"dshTitle":"  "}'), undefined)
+  assert.equal(titleFromLine('{"dshTitle":42}'), undefined)
+  assert.equal(titleFromLine(undefined), undefined)
+})
+
+test('readJsonlDelta(): a title written by an export reaches the next import', async () => {
+  // The realistic shape: an export created the file (its own lines are skipped
+  // as echoes), the user then kept working in that tool, so genuine records
+  // follow. The title must ride along on those records.
+  const { memoryTransport } = await import('./helpers.js')
+  const ours = renderExternalLine('claude', { role: 'user', text: 'hello', ts: 1_700_000_000_000 }, 'dsh:x:1', 'Carried title')
+  const theirs = '{"type":"user","sessionId":"s1","message":{"role":"user","content":[{"type":"text","text":"continued here"}]}}\n'
+  const transport = memoryTransport({ '/home/tester/a.jsonl': ours + theirs })
+  const delta = await readJsonlDelta(transport, '/home/tester/a.jsonl', 'claude', undefined)
+  assert.equal(delta.records.length, 1)
+  assert.equal(delta.records[0].text, 'continued here')
+  assert.equal(delta.records[0].meta.title, 'Carried title')
+})
+
+test('readJsonlDelta(): a file that is only our own export yields no records', async () => {
+  const { memoryTransport } = await import('./helpers.js')
+  const ours = renderExternalLine('claude', { role: 'user', text: 'hello', ts: 1_700_000_000_000 }, 'dsh:x:1', 'Carried title')
+  const transport = memoryTransport({ '/home/tester/a.jsonl': ours })
+  const delta = await readJsonlDelta(transport, '/home/tester/a.jsonl', 'claude', undefined)
+  assert.deepEqual(delta.records, [])
 })

@@ -131,18 +131,15 @@ test('client: a session bound more than once is still visible and marked', async
   assert.match(source, /cs-badge/, 'more than one binding needs a count badge')
 })
 
-test('client: the two-sided choices are one segmented control, not two buttons', async () => {
-  // They differ only in what happens when both sides moved - a policy, not a
-  // different action - so they share one control and one Bind button.
-  assert.match(source, /cs-seg'/)
-  assert.match(source, /bothMode === 'both' \? ' on' : ''/)
-  assert.match(source, /bothMode === 'auto' \? ' on' : ''/)
-  assert.match(source, /setBothMode\('both'\)/)
-  assert.match(source, /setBothMode\('auto'\)/)
-  assert.match(source, /pair\(bothMode\)/)
-  // The four old buttons are gone: one action per direction, plus the control.
-  assert.doesNotMatch(source, /void pair\('both'\)/)
-  assert.doesNotMatch(source, /void pair\('auto'\)/)
+test('client: four actions, four buttons, no intermediate apply step', async () => {
+  // Each button performs its own pairing: there is no "choose a mode, then
+  // press Bind" indirection, because a click should do what its label says.
+  assert.match(source, /onClick: \(\) => void pair\('in'\)/)
+  assert.match(source, /onClick: \(\) => void pair\('out'\)/)
+  assert.match(source, /onClick: \(\) => void pair\('both'\)/)
+  assert.match(source, /onClick: \(\) => void pair\('auto'\)/)
+  assert.doesNotMatch(source, /bothMode/)
+  assert.doesNotMatch(source, /cs-segBtn/)
 })
 
 test('client: the info bar shows the running host version and recent activity', async () => {
@@ -173,4 +170,24 @@ test('client: every t() key used by the UI exists in the dictionary', async () =
   const used = new Set([...source.matchAll(/(?<![A-Za-z0-9_$.])t\('([a-zA-Z0-9_.]+)'\)/g)].map(match => match[1]))
   const missing = [...used].filter(key => !(key in dict))
   assert.deepEqual(missing, [], `missing locale keys: ${missing.join(', ')}`)
+})
+
+test('client: a row shows a human title and opens a preview on hover', async () => {
+  // A rollout is named after a UUID or a timestamp. Without a title and a
+  // preview the list is unreadable, and two similar sessions cannot be told
+  // apart before binding one.
+  assert.match(source, /titleOf = item => item\?\.title \|\| item\?\.name/)
+  assert.match(source, /hoverProps/)
+  assert.match(source, /onMouseEnter/)
+  assert.match(source, /cs-hover/)
+  assert.match(source, /session\.preview/)
+  assert.match(source, /panel\.noPreview/)
+})
+
+test('client: the four buttons each perform their own pairing', async () => {
+  // No "pick a mode, then press Bind" indirection: the label says what the
+  // click does.
+  for (const direction of ['in', 'out', 'both', 'auto']) {
+    assert.match(source, new RegExp(`onClick: \\(\\) => void pair\\('${direction}'\\)`))
+  }
 })

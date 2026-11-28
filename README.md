@@ -92,6 +92,24 @@ refresh while the host keeps its old code until the app restarts, so a version
 older than the package you installed is the reason a new action answers
 `unknown action`.
 
+### Titles and previews
+
+A rollout is named by its tool, not by its content: a Claude file is a UUID and a
+Codex file is a rollout timestamp, so a list of them is a list of letters. Each
+row therefore shows the conversation's **title** — the first thing that was
+said — with the internal id kept underneath in small type, because that id is
+what a binding is keyed on.
+
+Hovering a row opens a card with the title, the tool, the message count, the
+machine and the time, plus the first few lines of **both sides** of the
+conversation. That is what makes two similar sessions distinguishable before one
+of them is bound.
+
+Titles travel with the conversation in both directions. DSH folds the latest
+`session/title` event, so a rename made in DSH is what gets exported; the title
+rides along on the exported lines as `dshTitle`, and an import restores it —
+including when the session is created for the first time.
+
 ### Which side is newer?
 
 Before anything is written, both sides are compared and the direction is derived
@@ -206,7 +224,7 @@ repository and workflow file.
 npm test        # unit tests, node:test, no network and no DSH needed
 ```
 
-174 unit tests cover the pure modules — adapters, event building, `.ssh/config`
+185 unit tests cover the pure modules — adapters, event building, `.ssh/config`
 parsing, discovery, rollback diagnostics and file-level session restore, host
 keys, SQLite reads, jump-chain planning, the connection pool, the system-ssh
 transport, the one-folder migration, and the browser half through a stub module

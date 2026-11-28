@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { listDshSessions, readDshSessionMessages, dshSessionExists, inspectDshLog, countDshEvents } from '../lib/dsh-sessions.js'
+import { listDshSessions, readDshSessionMessages, readDshSessionTitle, dshSessionExists, inspectDshLog, countDshEvents } from '../lib/dsh-sessions.js'
 
 /** Minimal in-memory persistence/session facade for one or more logs. */
 function facade(logs, { failStat = false, failOpen = false, title } = {}) {
@@ -164,4 +164,47 @@ test('dshSessionExists(): distinguishes a real session from a stale id', async (
 test('dshSessionExists(): a live session counts without touching persistence', async () => {
   const exists = await dshSessionExists({ persistence: {}, sessions: { get: id => (id === 'live' ? { id } : undefined) }, sessionId: 'live' })
   assert.equal(exists, true)
+})
+
+test('listDshSessions(): the latest title event wins over an older one', async () => {
+  // DSH folds the LAST session/title event, so a session renamed twice shows
+  // the second name. Reading the first would show a stale title in the panel.
+  const log = [
+    userMessage(0, 'hello'),
+    { seq: 1, time: 2, type: 'session/title', data: { title: 'First name' } },
+    { seq: 2, time: 3, type: 'session/title', data: { title: 'Second name' } },
+  ]
+  const { persistence, sessions } = facade({ s1: log })
+  const rows = await listDshSessions({ persistence, sessions })
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].title, 'Second name')
+})
+
+test('readDshSessionTitle(): returns the folded title, or undefined', async () => {
+  const titled = facade({
+    s1: [
+      { seq: 0, time: 1, type: 'session/title', data: { title: 'Named once' } },
+      userMessage(1, 'hello'),
+    ],
+  })
+  assert.equal(await readDshSessionTitle({ ...titled, sessionId: 's1' }), 'Named once')
+
+  const untitled = facade({ s2: [userMessage(0, 'hello')] })
+  assert.equal(await readDshSessionTitle({ ...untitled, sessionId: 's2' }), undefined)
+
+  // A missing or unreadable session must never break an export.
+  const broken = facade({}, { failOpen: true })
+  assert.equal(await readDshSessionTitle({ ...broken, sessionId: 'nope' }), undefined)
+})
+
+test('readDshSessionTitle(): a live session is read from memory, not the log', async () => {
+  const live = {
+    log: [
+      { seq: 0, type: 'session/title', data: { title: 'Old' } },
+      { seq: 1, type: 'session/title', data: { title: 'Live name' } },
+    ],
+  }
+  const { persistence } = facade({})
+  const sessions = { get: id => (id === 'live' ? live : undefined) }
+  assert.equal(await readDshSessionTitle({ persistence, sessions, sessionId: 'live' }), 'Live name')
 })

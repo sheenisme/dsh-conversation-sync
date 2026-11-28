@@ -244,7 +244,7 @@ published to npm, so no released build can have produced one.
 
 ## Testing
 
-`npm test` runs 174 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
+`npm test` runs 185 unit tests (`node:test`, no network and no DSH needed). Each tool format has a
 fixture in `test/fixtures/` that is pushed through the real pipeline —
 `readJsonlDelta` → `buildEvents` → `messagesFromEvents` — so the assertions are
 about imported conversation content, not internal shapes. `test/dsh-sessions.test.js`
@@ -343,6 +343,32 @@ run (the witness is its `lastSyncAt`, since pairing performs the first sync
 itself), re-checking puts it back and writes a non-empty file, and direction
 `auto` does nothing when nothing changed but imports as soon as the source is
 appended to.
+
+## A title is part of the conversation
+
+DSH has no title field in the session header: `dsh-session-title` folds the LAST
+`session/title` event in the log (`events.findLast(item => item.type ===
+'session/title')`), so a session renamed twice shows its second name and a
+header-only read shows a stale one. `listDshSessions()` therefore reads the
+latest title event, and `readDshSessionTitle()` returns the same value for the
+export path.
+
+For the other direction the title rides on the exported lines as a `dshTitle`
+field. `titleFromLine()` checks for the marker before parsing any JSON — a scan
+reads thousands of lines from tools that know nothing about DSH titles — and
+`readJsonlDelta()` attaches the first title it finds to every record it returns,
+so an import can restore the name even when the session is created fresh.
+
+Two rules follow from "the title belongs to the conversation":
+
+* An import with no carried title names itself after the first user message,
+  never after the file path. A binding's `name` defaults to the external path,
+  so passing that through named every imported session after a filename — the
+  first end-to-end assertion caught it (`the session is still named after its
+  path`).
+* A row's `name` (the tool's own id) is kept as the binding key but is shown
+  only as small secondary text. What a reader sees is the title, because a UUID
+  and a rollout timestamp cannot tell two conversations apart.
 
 ## The status strip exists to expose a stale host
 
